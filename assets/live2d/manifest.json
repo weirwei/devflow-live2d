@@ -1,0 +1,39 @@
+{
+  "sdk": {
+    "engine": "external-official",
+    "adapterScript": "assets/live2d/adapters/official-demo-runtime.js"
+  },
+  "model": {
+    "id": "nito-runtime",
+    "name": "Nito",
+    "basePath": "assets/live2d/models/nito-runtime",
+    "modelJson": "nito.model3.json",
+    "scale": 0.98,
+    "offsetX": 0,
+    "offsetY": 8,
+    "runtimeWidth": 1.1,
+    "centerX": 0.45,
+    "centerY": 0.12
+  },
+  "motions": {
+    "idleWave": "Idle",
+    "acknowledge": "Tap",
+    "greet": "FlickUp",
+    "workLoop": "Idle",
+    "ponder": "FlickDown",
+    "celebrate": "Flick3",
+    "shake": "Shake"
+  },
+  "expressions": {
+    "calm": "Idle",
+    "attentive": "Idle",
+    "alert": "FlickRight",
+    "focus": "Tap",
+    "thinking": "FlickDown",
+    "happy": "Flick3"
+  },
+  "source": {
+    "archive": "nito.zip",
+    "modelPath": "nito/runtime/nito.model3.json"
+  }
+}

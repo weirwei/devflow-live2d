@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Devflow Live2D Desktop</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell" id="shell">
+      <section class="bubble bubble--hidden" id="bubble">
+        <div class="bubble__label">Devflow</div>
+        <div class="bubble__text" id="bubbleText">Waiting for protocol events...</div>
+      </section>
+
+      <section class="avatar-stage" id="avatarStage">
+        <div class="avatar-stage__glow"></div>
+        <div class="avatar-shell" id="avatarShell" data-mood="calm" data-motion="idleWave">
+          <div class="avatar-shell__ornament"></div>
+          <div class="avatar-shell__body">
+            <div class="avatar-shell__badge" data-avatar-badge>idleWave</div>
+            <div class="avatar-shell__eyes" data-avatar-eyes>◕ ◕</div>
+            <div class="avatar-shell__mouth" data-avatar-mouth>﹏</div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

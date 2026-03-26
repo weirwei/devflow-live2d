@@ -1,0 +1,32 @@
+{
+  "sdk": {
+    "engine": "external-official",
+    "adapterScript": "assets/live2d/adapters/cubism-official-adapter.js"
+  },
+  "model": {
+    "id": "sample-model",
+    "name": "Sample Model",
+    "basePath": "assets/live2d/models/sample-model",
+    "modelJson": "sample.model3.json",
+    "scale": 0.82,
+    "offsetX": 0,
+    "offsetY": 18
+  },
+  "motions": {
+    "idleWave": "Idle",
+    "acknowledge": "TapBody",
+    "greet": "TapBody",
+    "workLoop": "Idle",
+    "ponder": "Idle",
+    "celebrate": "TapBody",
+    "shake": "TapBody"
+  },
+  "expressions": {
+    "calm": "neutral",
+    "attentive": "neutral",
+    "alert": "surprised",
+    "focus": "serious",
+    "thinking": "serious",
+    "happy": "smile"
+  }
+}

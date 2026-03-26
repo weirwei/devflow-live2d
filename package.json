@@ -1,0 +1,17 @@
+{
+  "name": "devflow-live2d",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "main.js",
+  "scripts": {
+    "dev": "electron .",
+    "start": "electron .",
+    "doctor": "node scripts/check-live2d-assets.mjs",
+    "import:official-sdk": "node scripts/import-official-sdk.mjs",
+    "test": "node --check main.js && node --check preload.js && node --check ui/app.js && bun test"
+  },
+  "devDependencies": {
+    "electron": "^41.0.0"
+  }
+}

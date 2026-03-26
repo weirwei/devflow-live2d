@@ -1,0 +1,606 @@
+import {
+  app,
+  BrowserWindow,
+  Tray,
+  Menu,
+  globalShortcut,
+  ipcMain,
+  nativeImage,
+  screen,
+} from "electron";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+import {
+  DEFAULT_LIVE2D_MODEL_ID,
+  LIVE2D_MODEL_CATALOG,
+  getLive2DModelById,
+} from "./src/live2d-model-catalog.js";
+import { IPC_CHANNELS } from "./src/ipc-channels.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const SETTINGS_FILE_NAME = "devflow-live2d-settings.json";
+const AVATAR_LIMIT = 220;
+const SCALE_MIN = 50;
+const SCALE_MAX = 150;
+const DEFAULT_PROTOCOL_BASE_URL =
+  process.env.DEVFLOW_PROTOCOL_URL?.trim() || "http://127.0.0.1:4317";
+
+const DEFAULT_STATE = {
+  protocolBaseUrl: DEFAULT_PROTOCOL_BASE_URL,
+  clickThrough: false,
+  alwaysOnTop: true,
+  allWorkspaces: true,
+  hidden: false,
+  panelCollapsed: true,
+  selectedModelId: DEFAULT_LIVE2D_MODEL_ID,
+  avatarTuning: {
+    scale: 100,
+    offsetX: 0,
+    offsetY: 0,
+  },
+};
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function safeNumber(value, fallback, min, max) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return clamp(parsed, min, max);
+}
+
+function normalizeAvatarTuning(input = {}) {
+  return {
+    scale: safeNumber(
+      input.scale,
+      DEFAULT_STATE.avatarTuning.scale,
+      SCALE_MIN,
+      SCALE_MAX,
+    ),
+    offsetX: safeNumber(
+      input.offsetX,
+      DEFAULT_STATE.avatarTuning.offsetX,
+      -AVATAR_LIMIT,
+      AVATAR_LIMIT,
+    ),
+    offsetY: safeNumber(
+      input.offsetY,
+      DEFAULT_STATE.avatarTuning.offsetY,
+      -AVATAR_LIMIT,
+      AVATAR_LIMIT,
+    ),
+  };
+}
+
+function normalizeProtocolBaseUrl(value, fallback = DEFAULT_PROTOCOL_BASE_URL) {
+  if (typeof value !== "string") return fallback;
+  const trimmed = value.trim();
+  return trimmed || fallback;
+}
+
+function getMotionPreviewOptions(model) {
+  if (!model?.manifestModel?.basePath || !model?.manifestModel?.modelJson) {
+    return [];
+  }
+
+  try {
+    const modelJsonPath = path.join(
+      __dirname,
+      model.manifestModel.basePath,
+      model.manifestModel.modelJson,
+    );
+    const raw = fs.readFileSync(modelJsonPath, "utf-8");
+    const parsed = JSON.parse(raw);
+    const motions = parsed?.FileReferences?.Motions;
+    if (!motions || typeof motions !== "object") {
+      return [];
+    }
+    return Object.entries(motions).flatMap(([groupName, items]) => {
+      if (!Array.isArray(items)) {
+        return [];
+      }
+      return items.map((item, index) => {
+        const file = typeof item?.File === "string" ? item.File : `${groupName} #${index + 1}`;
+        return {
+          groupName,
+          index,
+          file,
+          label: `${groupName} / ${file}`,
+        };
+      });
+    });
+  } catch {
+    return [];
+  }
+}
+
+function buildState(partial = {}, current = DEFAULT_STATE) {
+  const model = getLive2DModelById(partial.selectedModelId ?? current.selectedModelId);
+  return {
+    ...current,
+    ...partial,
+    protocolBaseUrl: normalizeProtocolBaseUrl(
+      partial.protocolBaseUrl ?? current.protocolBaseUrl,
+      DEFAULT_PROTOCOL_BASE_URL,
+    ),
+    selectedModelId: model.id,
+    avatarTuning: normalizeAvatarTuning({
+      ...current.avatarTuning,
+      ...(partial.avatarTuning || {}),
+    }),
+  };
+}
+
+class OverlayStateStore {
+  constructor() {
+    this.state = buildState();
+  }
+
+  get() {
+    return {
+      ...this.state,
+      avatarTuning: { ...this.state.avatarTuning },
+      selectedModel: getLive2DModelById(this.state.selectedModelId),
+    };
+  }
+
+  update(partial = {}) {
+    this.state = buildState(partial, this.state);
+    return this.get();
+  }
+
+  replace(next) {
+    this.state = buildState(next, buildState());
+    return this.get();
+  }
+}
+
+class SettingsRepository {
+  constructor(getPath) {
+    this.getPath = getPath;
+  }
+
+  read() {
+    try {
+      const raw = fs.readFileSync(this.getPath(), "utf-8");
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+
+  write(state) {
+    fs.mkdirSync(path.dirname(this.getPath()), { recursive: true });
+    fs.writeFileSync(this.getPath(), JSON.stringify(state, null, 2));
+  }
+}
+
+class LocalFileGateway {
+  constructor(rootDir) {
+    this.rootDir = rootDir;
+  }
+
+  resolveSafePath(relativePath) {
+    if (typeof relativePath !== "string" || !relativePath.trim()) {
+      throw new Error("Path must be a non-empty string.");
+    }
+
+    const normalized = path.normalize(relativePath).replace(/\\/g, "/");
+    if (path.isAbsolute(normalized) || normalized.startsWith("../") || normalized.includes("/../")) {
+      throw new Error("Path must stay inside app root.");
+    }
+
+    const absolutePath = path.resolve(this.rootDir, normalized);
+    const rootWithSep = `${path.resolve(this.rootDir)}${path.sep}`;
+    const absoluteResolved = path.resolve(absolutePath);
+    if (absoluteResolved !== path.resolve(this.rootDir) && !absoluteResolved.startsWith(rootWithSep)) {
+      throw new Error("Path escapes app root.");
+    }
+
+    return absolutePath;
+  }
+
+  readTextFile(relativePath) {
+    const absolutePath = this.resolveSafePath(relativePath);
+    return fs.readFileSync(absolutePath, "utf-8");
+  }
+}
+
+class OverlayWindowController {
+  constructor({ rootDir, onFocusChange, onCloseRequest, onHideRequested }) {
+    this.rootDir = rootDir;
+    this.onFocusChange = onFocusChange;
+    this.onCloseRequest = onCloseRequest;
+    this.onHideRequested = onHideRequested;
+    this.window = null;
+  }
+
+  create() {
+    const display = screen.getPrimaryDisplay();
+    const { x: workX, y: workY, width, height } = display.workArea;
+    const overlayWidth = 420;
+    const overlayHeight = 720;
+
+    this.window = new BrowserWindow({
+      width: overlayWidth,
+      height: overlayHeight,
+      x: Math.round(workX + (width - overlayWidth) / 2),
+      y: Math.round(workY + (height - overlayHeight) / 2),
+      frame: false,
+      transparent: true,
+      hasShadow: false,
+      resizable: true,
+      fullscreenable: false,
+      maximizable: false,
+      minimizable: true,
+      movable: true,
+      roundedCorners: false,
+      title: "Devflow Live2D Desktop",
+      backgroundColor: "#00000000",
+      skipTaskbar: true,
+      webPreferences: {
+        preload: path.join(this.rootDir, "preload.js"),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: false,
+      },
+    });
+
+    this.window.loadFile(path.join(this.rootDir, "ui/index.html"));
+    this.window.webContents.on("before-input-event", (event, input) => {
+      const isCloseShortcut =
+        input.type === "keyDown" &&
+        (input.meta || input.control) &&
+        String(input.key || "").toLowerCase() === "w";
+
+      if (isCloseShortcut) {
+        event.preventDefault();
+        this.onHideRequested?.("shortcut");
+      }
+    });
+
+    this.window.on("close", (event) => {
+      const shouldClose = this.onCloseRequest?.() ?? true;
+      if (!shouldClose) {
+        event.preventDefault();
+        this.onHideRequested?.("close-event");
+      }
+    });
+    this.window.on("closed", () => {
+      this.window = null;
+      this.onFocusChange(false);
+    });
+    this.window.on("focus", () => this.onFocusChange(true));
+    this.window.on("blur", () => this.onFocusChange(false));
+
+    return this.window;
+  }
+
+  ensure() {
+    if (!this.window) {
+      return this.create();
+    }
+    return this.window;
+  }
+
+  broadcast(channel, payload) {
+    this.window?.webContents.send(channel, payload);
+  }
+
+  applyMode(state) {
+    if (!this.window) return;
+
+    if (state.alwaysOnTop) {
+      this.window.setAlwaysOnTop(true, "screen-saver");
+    } else {
+      this.window.setAlwaysOnTop(false);
+    }
+
+    if (process.platform === "darwin") {
+      this.window.setVisibleOnAllWorkspaces(Boolean(state.allWorkspaces), {
+        visibleOnFullScreen: Boolean(state.allWorkspaces),
+      });
+    }
+
+    this.window.setIgnoreMouseEvents(Boolean(state.clickThrough), { forward: true });
+    if (state.hidden) {
+      this.window.hide();
+    } else {
+      this.window.showInactive();
+    }
+  }
+}
+
+class TrayController {
+  constructor(onBuildMenu) {
+    this.tray = null;
+    this.onBuildMenu = onBuildMenu;
+  }
+
+  buildIcon() {
+    const svg = `
+      <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18">
+        <g fill="black">
+          <rect x="2" y="2" width="14" height="14" rx="4"/>
+          <rect x="5.2" y="6.1" width="1.8" height="1.8" rx="0.9" fill="white"/>
+          <rect x="11" y="6.1" width="1.8" height="1.8" rx="0.9" fill="white"/>
+          <path d="M5.5 11.1c1.2 1.4 2.3 2 3.5 2 1.2 0 2.3-.6 3.5-2" fill="none" stroke="white" stroke-width="1.4" stroke-linecap="round"/>
+        </g>
+      </svg>
+    `.trim();
+
+    const icon = nativeImage.createFromDataURL(
+      `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`,
+    );
+    icon.setTemplateImage(true);
+    return icon.resize({ width: 18, height: 18 });
+  }
+
+  create() {
+    this.tray = new Tray(this.buildIcon());
+    if (process.platform === "darwin") {
+      this.tray.setTitle("D");
+    }
+    this.tray.setToolTip("Devflow Live2D");
+    this.tray.setIgnoreDoubleClickEvents(true);
+    this.tray.on("click", () => this.showMenu());
+    this.tray.on("right-click", () => this.showMenu());
+  }
+
+  ensure() {
+    if (!this.tray) this.create();
+  }
+
+  showMenu() {
+    if (!this.tray) return;
+    this.tray.popUpContextMenu(this.onBuildMenu());
+  }
+}
+
+class DesktopApp {
+  constructor() {
+    this.store = new OverlayStateStore();
+    this.settings = new SettingsRepository(() =>
+      path.join(app.getPath("userData"), SETTINGS_FILE_NAME),
+    );
+    this.files = new LocalFileGateway(__dirname);
+    this.focused = false;
+    this.isQuitting = false;
+    this.overlay = new OverlayWindowController({
+      rootDir: __dirname,
+      onFocusChange: (focused) => {
+        this.focused = focused;
+        this.broadcastState();
+      },
+      onCloseRequest: () => this.isQuitting,
+      onHideRequested: () => this.hideOverlay(),
+    });
+    this.tray = new TrayController(() => this.buildTrayMenu());
+  }
+
+  getPublicState() {
+    return {
+      ...this.store.get(),
+      platform: process.platform,
+      focused: this.focused,
+    };
+  }
+
+  loadSettings() {
+    const stored = this.settings.read();
+    if (stored) {
+      this.store.replace(stored);
+    }
+  }
+
+  persistSettings() {
+    this.settings.write(this.store.get());
+  }
+
+  updateState(partial = {}, options = {}) {
+    const { persist = true, broadcast = true } = options;
+    const next = this.store.update(partial);
+    this.overlay.applyMode(next);
+    if (persist) this.persistSettings();
+    if (broadcast) this.broadcastState();
+    return this.getPublicState();
+  }
+
+  hideOverlay() {
+    const state = this.store.get();
+    if (state.hidden) return this.getPublicState();
+    return this.updateState({ hidden: true });
+  }
+
+  broadcastState() {
+    this.overlay.broadcast(IPC_CHANNELS.STATE_BROADCAST, this.getPublicState());
+  }
+
+  buildTrayMenu() {
+    const state = this.store.get();
+    const currentScale = state.avatarTuning.scale;
+    const currentModel = getLive2DModelById(state.selectedModelId);
+    const currentModelId = currentModel.id;
+    const presetScales = [50, 60, 70, 80, 100, 120];
+    const motionOptions = getMotionPreviewOptions(currentModel);
+
+    return Menu.buildFromTemplate([
+      {
+        label: state.hidden ? "显示角色" : "隐藏角色",
+        click: () => this.updateState({ hidden: !state.hidden }),
+      },
+      { type: "separator" },
+      {
+        label: "始终置顶",
+        type: "checkbox",
+        checked: state.alwaysOnTop,
+        click: () => this.updateState({ alwaysOnTop: !state.alwaysOnTop }),
+      },
+      {
+        label: "所有桌面可见",
+        type: "checkbox",
+        checked: state.allWorkspaces,
+        click: () => this.updateState({ allWorkspaces: !state.allWorkspaces }),
+      },
+      {
+        label: "点击穿透",
+        type: "checkbox",
+        checked: state.clickThrough,
+        click: () => this.updateState({ clickThrough: !state.clickThrough }),
+      },
+      { type: "separator" },
+      {
+        label: "模型",
+        submenu: LIVE2D_MODEL_CATALOG.map((model) => ({
+          label: model.name,
+          type: "radio",
+          checked: currentModelId === model.id,
+          click: () => {
+            this.updateState({ selectedModelId: model.id });
+          },
+        })),
+      },
+      {
+        label: "播放 Motion",
+        submenu:
+          motionOptions.length > 0
+            ? motionOptions.map((motion) => ({
+                label: motion.label,
+                click: () => {
+                  console.log(
+                    `[devflow-live2d] preview motion ${motion.groupName}[${motion.index}] ${motion.file}`,
+                  );
+                  this.overlay.broadcast(IPC_CHANNELS.PLAY_MOTION, {
+                    groupName: motion.groupName,
+                    index: motion.index,
+                    file: motion.file,
+                  });
+                },
+              }))
+            : [{ label: "当前模型无可用 Motion", enabled: false }],
+      },
+      {
+        label: "角色大小",
+        submenu: [
+          ...presetScales.map((scale) => ({
+            label: `${scale}%`,
+            type: "checkbox",
+            checked: currentScale === scale,
+            click: () =>
+              this.updateState({
+                avatarTuning: {
+                  ...state.avatarTuning,
+                  scale,
+                },
+              }),
+          })),
+          { type: "separator" },
+          {
+            label: "缩小一点",
+            click: () =>
+              this.updateState({
+                avatarTuning: {
+                  ...state.avatarTuning,
+                  scale: currentScale - 10,
+                },
+              }),
+          },
+          {
+            label: "放大一点",
+            click: () =>
+              this.updateState({
+                avatarTuning: {
+                  ...state.avatarTuning,
+                  scale: currentScale + 10,
+                },
+              }),
+          },
+        ],
+      },
+      {
+        label: "恢复默认",
+        click: () =>
+          this.updateState({
+            avatarTuning: { ...DEFAULT_STATE.avatarTuning },
+          }),
+      },
+      { type: "separator" },
+      {
+        label: "退出",
+        accelerator: "CommandOrControl+Q",
+        click: () => app.quit(),
+      },
+    ]);
+  }
+
+  registerIpc() {
+    ipcMain.handle(IPC_CHANNELS.GET_STATE, () => this.getPublicState());
+    ipcMain.handle(IPC_CHANNELS.UPDATE_STATE, (_event, partialState) =>
+      this.updateState(partialState || {}),
+    );
+    ipcMain.handle(IPC_CHANNELS.OPEN_MENU, () => {
+      this.tray.showMenu();
+      return this.getPublicState();
+    });
+    ipcMain.handle(IPC_CHANNELS.QUIT, () => {
+      this.isQuitting = true;
+      app.quit();
+      return true;
+    });
+    ipcMain.handle(IPC_CHANNELS.READ_TEXT_FILE, (_event, relativePath) =>
+      this.files.readTextFile(relativePath),
+    );
+  }
+
+  registerShortcuts() {
+    globalShortcut.register("CommandOrControl+Shift+X", () => {
+      this.updateState({ clickThrough: false });
+    });
+    globalShortcut.register("CommandOrControl+Shift+H", () => {
+      const state = this.store.get();
+      this.updateState({ hidden: !state.hidden });
+    });
+  }
+
+  initialize() {
+    this.loadSettings();
+    this.overlay.ensure();
+    this.overlay.applyMode(this.store.get());
+    this.tray.ensure();
+    this.persistSettings();
+    this.broadcastState();
+    this.registerIpc();
+    this.registerShortcuts();
+  }
+}
+
+const desktopApp = new DesktopApp();
+
+app.whenReady().then(() => {
+  if (process.platform === "darwin") {
+    app.dock.hide();
+  }
+  desktopApp.initialize();
+
+  app.on("activate", () => {
+    desktopApp.overlay.ensure();
+    desktopApp.tray.ensure();
+    desktopApp.broadcastState();
+  });
+});
+
+app.on("before-quit", () => {
+  desktopApp.isQuitting = true;
+});
+
+app.on("window-all-closed", () => {
+  if (process.platform !== "darwin") {
+    app.quit();
+  }
+});
+
+app.on("will-quit", () => {
+  globalShortcut.unregisterAll();
+});
