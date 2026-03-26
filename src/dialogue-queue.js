@@ -23,6 +23,21 @@ export class DialogueQueue {
     }
   }
 
+  isBusy() {
+    return Boolean(this.currentItem) || this.items.length > 0;
+  }
+
+  hasPending() {
+    return this.items.length > 0;
+  }
+
+  hasChannel(channel) {
+    const expected = String(channel || "").trim();
+    if (!expected) return false;
+    if (this.currentItem?.channel === expected) return true;
+    return this.items.some((item) => item?.channel === expected);
+  }
+
   enqueue(item, options = {}) {
     if (!item || typeof item.text !== "string") return;
     const text = item.text.trim();

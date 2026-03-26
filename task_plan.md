@@ -1,25 +1,26 @@
-# Task Plan: Migrate Live2D Desktop From Backstage
+# Task Plan: Add Persona Small Talk To Live2D Desktop
 
 ## Goal
-Copy the functional surface from `backstage/apps/live2d-desktop` into this project and adapt its data/protocol layer to `devflow-protocol` without compatibility shims.
+Add a local single-persona small-talk layer to `devflow-live2d` so the desktop avatar can produce backstage-style banter and short reactions without changing `devflow-protocol`.
 
 ## Phases
 - [x] Phase 1: Plan and setup
-- [x] Phase 2: Inspect source app and target protocol integration points
-- [x] Phase 3: Migrate code and assets into this repo
-- [x] Phase 4: Adapt protocol/event flow to `devflow-protocol`
-- [x] Phase 5: Verify with tests and smoke checks
-- [x] Phase 6: Review and deliver
+- [x] Phase 2: Inspect renderer, queue, and backstage reference dialogue logic
+- [x] Phase 3: Implement persona dialogue modules and queue read helpers
+- [x] Phase 4: Wire persona dialogue into the renderer event flow
+- [x] Phase 5: Verify with tests and syntax checks
 
 ## Key Questions
-1. Which parts of `apps/live2d-desktop` are pure UI/runtime code that can be copied as-is?
-2. Which source modules are coupled to Backstage viewer APIs and need to be rewritten for `devflow-protocol`?
-3. Which static assets and scripts are necessary for the migrated app to run here?
+1. How should local persona chat avoid interrupting real assistant dialogue bubbles?
+2. Which idle/event triggers belong in the desktop client instead of protocol or pixel-office?
+3. How much avatar mood linkage is enough without creating a second state machine?
 
 ## Decisions Made
-- Use the parent `apps/live2d-desktop` implementation as the baseline and adapt only the protocol-facing seams.
+- Keep persona chat fully local to the renderer and do not emit fake protocol events.
+- Use a single avatar persona inspired by backstage staff tone instead of multi-employee casting.
+- Reuse `assistantQueue` for persona dialogue pages and block persona chatter while real assistant dialogue is active.
 
 ## Errors Encountered
 
 ## Status
-**Completed** - The desktop app has been migrated and verified against the current `devflow-protocol` surface.
+**Completed** - Persona chat is implemented locally in the renderer and verified with passing tests.

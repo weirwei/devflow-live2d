@@ -29,3 +29,27 @@ This project now includes:
 - protocol-native event normalization for `devflow-protocol`
 
 This app is explicitly macOS-first.
+
+## Persona Dialogue Config
+
+AI persona dialogue can be configured in:
+
+```text
+~/.devflow/live2d/config.json
+```
+
+Example:
+
+```json
+{
+  "personaDialogue": {
+    "enabled": true,
+    "apiKey": "YOUR_API_KEY",
+    "model": "gpt-5-mini",
+    "apiUrl": "https://api.openai.com/v1/chat/completions",
+    "timeoutMs": 8000
+  }
+}
+```
+
+The tray menu `AI 闲聊` reads and updates the same config file. The API key stays in the main process and is not exposed to the renderer.

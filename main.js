@@ -7,8 +7,10 @@ import {
   ipcMain,
   nativeImage,
   screen,
+  shell,
 } from "electron";
 import fs from "fs";
+import { homedir } from "os";
 import path from "path";
 import { fileURLToPath } from "url";
 import {
@@ -23,9 +25,22 @@ import {
   resolveWindowBounds,
   sameWindowBounds,
 } from "./src/app/window-bounds.js";
+import {
+  DEFAULT_PERSONA_API_URL,
+  DEFAULT_PERSONA_MODEL,
+  DEFAULT_PERSONA_TIMEOUT_MS,
+  buildPersonaDialoguePrompt,
+  createDefaultPersonaDialogueSettings,
+  getPersonaDialogueConfig,
+  normalizePersonaDialogueSettings,
+  resolvePersonaDialogueConfig,
+  sanitizePersonaDialogueText,
+} from "./src/dialogue/persona-ai.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SETTINGS_FILE_NAME = "devflow-live2d-settings.json";
+const DEVFLOW_CONFIG_DIR = path.join(homedir(), ".devflow", "live2d");
+const DEVFLOW_CONFIG_FILE = path.join(DEVFLOW_CONFIG_DIR, "config.json");
 const AVATAR_LIMIT = 220;
 const SCALE_MIN = 50;
 const SCALE_MAX = 150;
@@ -42,6 +57,8 @@ const AVATAR_BEHAVIOR_PRESETS = [
   { key: "celebrate", mood: "happy", label: "完成", description: "成功 / 开心" },
   { key: "shake", mood: "alert", label: "警示", description: "失败 / 摇头" },
 ];
+const PERSONA_DIALOGUE_SYSTEM_PROMPT =
+  "You write one short Chinese desktop-avatar line. Return plain text only.";
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
@@ -82,6 +99,102 @@ function normalizeProtocolBaseUrl(value, fallback = DEFAULT_PROTOCOL_BASE_URL) {
   return trimmed || fallback;
 }
 
+function resolvePersonaApiUrl(raw) {
+  const trimmed = String(raw || "").trim();
+  if (!trimmed) return "";
+  if (/\/(chat\/completions|responses)$/.test(trimmed)) return trimmed;
+  return `${trimmed.replace(/\/+$/, "")}/v1/chat/completions`;
+}
+
+function resolvePersonaDialogueErrorText(response = {}) {
+  if (typeof response.error === "string" && response.error.trim()) {
+    return response.error.trim();
+  }
+  if (typeof response.reason === "string" && response.reason.trim()) {
+    return response.reason.trim();
+  }
+  return "AI 暂时不可用";
+}
+
+async function generatePersonaDialogue(input = {}, settings = {}, env = process.env) {
+  const config = resolvePersonaDialogueConfig(settings, env);
+  if (!config.enabled) {
+    return { ok: false, text: "", reason: "disabled" };
+  }
+
+  const prompt = buildPersonaDialoguePrompt(input);
+  const apiUrl = resolvePersonaApiUrl(config.apiUrl);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), config.timeoutMs);
+
+  try {
+    const response = await fetch(apiUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${config.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: config.model,
+        messages: [
+          { role: "system", content: PERSONA_DIALOGUE_SYSTEM_PROMPT },
+          { role: "user", content: prompt },
+        ],
+        temperature: 0.9,
+        max_tokens: 80,
+      }),
+      signal: controller.signal,
+    });
+
+    const rawText = await response.text();
+    if (!response.ok) {
+      return {
+        ok: false,
+        text: "",
+        reason: `http_${response.status}`,
+        error: rawText.slice(0, 240),
+      };
+    }
+
+    let content = rawText;
+    try {
+      const json = JSON.parse(rawText);
+      const chatOut = json?.choices?.[0]?.message?.content;
+      if (typeof chatOut === "string") {
+        content = chatOut;
+      } else if (Array.isArray(chatOut)) {
+        content = chatOut
+          .map((part) => (typeof part?.text === "string" ? part.text : ""))
+          .join("")
+          .trim();
+      } else if (typeof json?.output_text === "string" && json.output_text.trim()) {
+        content = json.output_text.trim();
+      }
+    } catch {}
+
+    const text = sanitizePersonaDialogueText(content, input.fallbackText || "");
+    if (!text) {
+      return { ok: false, text: "", reason: "empty" };
+    }
+
+    return {
+      ok: true,
+      text,
+      provider: "openai-compatible",
+      model: config.model,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      text: "",
+      reason: error?.name === "AbortError" ? "timeout" : "network",
+      error: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function createDefaultState() {
   return {
     protocolBaseUrl: DEFAULT_PROTOCOL_BASE_URL,
@@ -96,6 +209,7 @@ function createDefaultState() {
       offsetX: 0,
       offsetY: 0,
     },
+    personaDialogue: createDefaultPersonaDialogueSettings(),
     windowBounds: {
       x: 0,
       y: 0,
@@ -140,6 +254,13 @@ function buildState(partial = {}, current = DEFAULT_STATE) {
       ...current.avatarTuning,
       ...(partial.avatarTuning || {}),
     }),
+    personaDialogue: normalizePersonaDialogueSettings(
+      {
+        ...current.personaDialogue,
+        ...(partial.personaDialogue || {}),
+      },
+      DEFAULT_STATE.personaDialogue,
+    ),
     windowBounds: normalizeWindowBounds(partial.windowBounds, fallbackWindowBounds),
   };
 }
@@ -153,6 +274,7 @@ class OverlayStateStore {
     return {
       ...this.state,
       avatarTuning: { ...this.state.avatarTuning },
+      personaDialogue: { ...this.state.personaDialogue },
       windowBounds: this.state.windowBounds ? { ...this.state.windowBounds } : null,
       selectedModel: getLive2DModelById(this.state.selectedModelId),
     };
@@ -186,6 +308,35 @@ class SettingsRepository {
   write(state) {
     fs.mkdirSync(path.dirname(this.getPath()), { recursive: true });
     fs.writeFileSync(this.getPath(), JSON.stringify(state, null, 2));
+  }
+}
+
+class PersonaConfigRepository {
+  constructor(filePath) {
+    this.filePath = filePath;
+  }
+
+  read() {
+    try {
+      const raw = fs.readFileSync(this.filePath, "utf-8");
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+
+  write(settings) {
+    fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
+    fs.writeFileSync(
+      this.filePath,
+      JSON.stringify(
+        {
+          personaDialogue: normalizePersonaDialogueSettings(settings),
+        },
+        null,
+        2,
+      ),
+    );
   }
 }
 
@@ -411,6 +562,7 @@ class DesktopApp {
     this.settings = new SettingsRepository(() =>
       path.join(app.getPath("userData"), SETTINGS_FILE_NAME),
     );
+    this.personaConfig = new PersonaConfigRepository(DEVFLOW_CONFIG_FILE);
     this.files = new LocalFileGateway(__dirname);
     this.focused = false;
     this.isQuitting = false;
@@ -431,8 +583,17 @@ class DesktopApp {
   }
 
   getPublicState() {
+    const current = this.store.get();
+    const personaConfig = resolvePersonaDialogueConfig(current.personaDialogue);
     return {
-      ...this.store.get(),
+      ...current,
+      personaDialogue: {
+        enabled: current.personaDialogue.enabled,
+        model: current.personaDialogue.model,
+        apiUrl: current.personaDialogue.apiUrl,
+        timeoutMs: current.personaDialogue.timeoutMs,
+        configured: personaConfig.configured,
+      },
       platform: process.platform,
       focused: this.focused,
     };
@@ -443,10 +604,21 @@ class DesktopApp {
     if (stored) {
       this.store.replace(stored);
     }
+
+    const personaStored = this.personaConfig.read();
+    if (personaStored?.personaDialogue) {
+      this.store.update({
+        personaDialogue: normalizePersonaDialogueSettings(
+          personaStored.personaDialogue,
+          this.store.get().personaDialogue,
+        ),
+      });
+    }
   }
 
   persistSettings() {
     this.settings.write(this.store.get());
+    this.personaConfig.write(this.store.get().personaDialogue);
   }
 
   updateState(partial = {}, options = {}) {
@@ -475,6 +647,9 @@ class DesktopApp {
     const currentModelId = currentModel.id;
     const presetScales = [50, 60, 70, 80, 100, 120];
     const behaviorOptions = getAvatarBehaviorPreviewOptions(currentModel);
+    const personaConfig = resolvePersonaDialogueConfig(state.personaDialogue);
+    const personaApiUrl = state.personaDialogue.apiUrl || DEFAULT_PERSONA_API_URL;
+    const keyConfigured = personaConfig.configured;
 
     return Menu.buildFromTemplate([
       {
@@ -580,6 +755,85 @@ class DesktopApp {
       },
       { type: "separator" },
       {
+        label: "AI 闲聊",
+        submenu: [
+          {
+            label: "启用 AI 闲聊",
+            type: "checkbox",
+            checked: Boolean(state.personaDialogue.enabled && keyConfigured),
+            click: () =>
+              this.updateState({
+                personaDialogue: {
+                  ...state.personaDialogue,
+                  enabled: !state.personaDialogue.enabled,
+                },
+              }),
+          },
+          {
+            label: "打开配置文件夹",
+            click: () => {
+              fs.mkdirSync(DEVFLOW_CONFIG_DIR, { recursive: true });
+              void shell.openPath(DEVFLOW_CONFIG_DIR);
+            },
+          },
+          { type: "separator" },
+          {
+            label: `模型: ${personaConfig.model || DEFAULT_PERSONA_MODEL} (配置文件)`,
+            enabled: false,
+          },
+          {
+            label: `API URL: ${personaApiUrl.replace(/^https?:\/\//, "")}`,
+            enabled: false,
+          },
+          {
+            label: "重新加载配置文件",
+            click: () => {
+              const next = this.personaConfig.read();
+              if (!next?.personaDialogue) return;
+              this.updateState(
+                {
+                  personaDialogue: normalizePersonaDialogueSettings(
+                    next.personaDialogue,
+                    state.personaDialogue,
+                  ),
+                },
+                { persist: true },
+              );
+            },
+          },
+          {
+            label: "测试生成一句",
+            enabled: Boolean(state.personaDialogue.enabled && keyConfigured),
+            click: async () => {
+              const fallbackText = "先安静一会儿，等下一条动静。";
+              const response = await generatePersonaDialogue(
+                {
+                  category: "idle",
+                  fallbackText,
+                  project: "devflow-live2d",
+                  task: "Persona dialogue smoke test",
+                  message: "Generate one idle desktop companion line.",
+                },
+                state.personaDialogue,
+              );
+
+              this.overlay.broadcast(IPC_CHANNELS.PREVIEW_AVATAR_STATE, {
+                mood: response.ok ? "attentive" : "calm",
+                expression: response.ok ? "attentive" : "calm",
+                motion: response.ok ? "acknowledge" : "idleWave",
+                source: "tray-preview",
+                label: response.ok ? "AI 闲聊测试" : "AI 闲聊回退",
+                previewText: response.ok ? response.text : fallbackText,
+                previewStatus: response.ok
+                  ? "AI 闲聊测试"
+                  : `${resolvePersonaDialogueErrorText(response)}，已回退本地文案`,
+              });
+            },
+          },
+        ],
+      },
+      { type: "separator" },
+      {
         label: "退出",
         accelerator: "CommandOrControl+Q",
         click: () => app.quit(),
@@ -603,6 +857,9 @@ class DesktopApp {
     });
     ipcMain.handle(IPC_CHANNELS.READ_TEXT_FILE, (_event, relativePath) =>
       this.files.readTextFile(relativePath),
+    );
+    ipcMain.handle(IPC_CHANNELS.GENERATE_PERSONA_DIALOGUE, async (_event, payload) =>
+      generatePersonaDialogue(payload || {}, this.store.get().personaDialogue),
     );
   }
 

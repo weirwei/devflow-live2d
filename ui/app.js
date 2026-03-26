@@ -8,6 +8,11 @@ import { Live2DAdapter } from "../src/live2d-adapter.js";
 import { resolveRuntimeConfig } from "../src/live2d-config.js";
 import { InteractionController } from "../src/interaction-controller.js";
 import { DialogueQueue } from "../src/dialogue-queue.js";
+import {
+  PersonaChatController,
+  PERSONA_POLL_INTERVAL_MS,
+  buildPersonaRequestContext,
+} from "../src/dialogue/persona-chat.js";
 import { deriveStatusBubble } from "../src/status-bubble.js";
 import { getLive2DModelById } from "../src/live2d-model-catalog.js";
 import {
@@ -16,6 +21,13 @@ import {
 } from "../src/avatar/interruptPolicy.js";
 
 const DEFAULT_PROTOCOL_BASE_URL = "http://127.0.0.1:4317";
+const PERSONA_MOTION_BY_MOOD = {
+  calm: "idleWave",
+  attentive: "acknowledge",
+  alert: "greet",
+  thinking: "ponder",
+  happy: "celebrate",
+};
 
 const appState = {
   protocolBaseUrl: DEFAULT_PROTOCOL_BASE_URL,
@@ -53,6 +65,8 @@ const appState = {
 };
 
 let runtimeSwitching = false;
+let personaTickTimer = null;
+let personaGenerationInFlight = false;
 const dialogueQueue = new DialogueQueue({
   maxSize: 40,
   defaultDurationMs: 3800,
@@ -61,6 +75,7 @@ const assistantQueue = new DialogueQueue({
   maxSize: 80,
   defaultDurationMs: 5200,
 });
+const personaController = new PersonaChatController();
 
 const elements = {
   shell: document.querySelector("#shell"),
@@ -72,13 +87,44 @@ const elements = {
   avatarShell: document.querySelector("#avatarShell"),
 };
 
+let bubbleLayoutFrame = 0;
+
 function applyAvatarTransformVariables() {
   const root = document.documentElement;
+
   root.style.setProperty("--avatar-scale", String(appState.avatarTuning.scale / 100));
   root.style.setProperty("--avatar-offset-x", `${appState.avatarTuning.offsetX}px`);
   root.style.setProperty("--avatar-offset-y", `${appState.avatarTuning.offsetY}px`);
   root.style.setProperty("--avatar-tilt-x", `${appState.interaction.tiltX}deg`);
   root.style.setProperty("--avatar-tilt-y", `${appState.interaction.tiltY}deg`);
+}
+
+function updateBubbleLayout() {
+  const shellRect = elements.shell.getBoundingClientRect();
+  const avatarRect = elements.avatarShell.getBoundingClientRect();
+  const bubbleRect = elements.bubble.getBoundingClientRect();
+  const viewportPadding = 14;
+  const bubbleGap = -6;
+  const visualAnchorRatio = appState.runtime.id === "mock" ? 0.2 : 0.42;
+  const minTop = viewportPadding;
+  const maxTop = Math.max(
+    minTop,
+    shellRect.height - bubbleRect.height - viewportPadding,
+  );
+  const visualTop =
+    avatarRect.top - shellRect.top + avatarRect.height * visualAnchorRatio;
+  const desiredTop = visualTop - bubbleRect.height - bubbleGap;
+  const bubbleTop = Math.min(maxTop, Math.max(minTop, desiredTop));
+
+  document.documentElement.style.setProperty("--bubble-top", `${Math.round(bubbleTop)}px`);
+}
+
+function scheduleBubbleLayout() {
+  if (bubbleLayoutFrame) cancelAnimationFrame(bubbleLayoutFrame);
+  bubbleLayoutFrame = requestAnimationFrame(() => {
+    bubbleLayoutFrame = 0;
+    updateBubbleLayout();
+  });
 }
 
 async function renderAvatarFrame() {
@@ -112,6 +158,7 @@ function renderBubble() {
   elements.bubble.classList.toggle("bubble--with-text", hasText);
   elements.bubble.classList.toggle("bubble--visible", isVisible);
   elements.bubble.classList.toggle("bubble--hidden", !isVisible);
+  scheduleBubbleLayout();
 }
 
 function renderAll() {
@@ -119,6 +166,7 @@ function renderAll() {
   applyAvatarTransformVariables();
   renderRuntimeMode();
   renderBubble();
+  scheduleBubbleLayout();
   void renderAvatarFrame();
 }
 
@@ -139,6 +187,33 @@ function scheduleAvatarInterruptRelease(guard) {
     if (!activeGuard || activeGuard.until !== guard.until) return;
     appState.avatarInterruptGuard = null;
   }, delay);
+}
+
+function isAvatarInterruptBlocked(now = Date.now()) {
+  return Boolean(
+    appState.avatarInterruptGuard &&
+      Number.isFinite(appState.avatarInterruptGuard.until) &&
+      appState.avatarInterruptGuard.until > now,
+  );
+}
+
+function applyPersonaMoodHint(personaItem) {
+  if (!personaItem?.mood) return false;
+  if (isAvatarInterruptBlocked(personaItem.createdAt || Date.now())) {
+    return false;
+  }
+
+  const nextMood = personaItem.mood;
+  appState.avatarState = {
+    ...appState.avatarState,
+    mood: nextMood,
+    motion: PERSONA_MOTION_BY_MOOD[nextMood] || PERSONA_MOTION_BY_MOOD.calm,
+    expression: nextMood,
+    lastEventType: `persona.${personaItem.category || "chat"}`,
+    source: "persona",
+    updatedAt: personaItem.createdAt || Date.now(),
+  };
+  return true;
 }
 
 function applyNormalizedEventToAvatar(normalized) {
@@ -162,10 +237,83 @@ function applyNormalizedEventToAvatar(normalized) {
   return true;
 }
 
+function canPersonaSpeakNow() {
+  if (!appState.hasEverConnected) return false;
+  if (assistantQueue.hasChannel("dialogue")) return false;
+  return true;
+}
+
+function enqueuePersonaBubble(personaItem) {
+  if (!personaItem?.text || assistantQueue.hasChannel("dialogue")) {
+    return false;
+  }
+
+  const pages = splitAssistantMessage(personaItem.text);
+  const applied = applyPersonaMoodHint(personaItem);
+
+  for (const page of pages) {
+    assistantQueue.enqueue({
+      text: page,
+      tone: "neutral",
+      channel: "persona",
+    });
+  }
+
+  if (applied) {
+    void renderAvatarFrame();
+  }
+
+  return true;
+}
+
+async function maybeGeneratePersonaLine(personaItem, normalizedEvent = null) {
+  if (!personaItem?.text || personaGenerationInFlight) {
+    return personaItem;
+  }
+
+  const generator = window.desktopAPI?.generatePersonaDialogue;
+  if (typeof generator !== "function") {
+    return personaItem;
+  }
+
+  personaGenerationInFlight = true;
+  try {
+    const response = await generator(buildPersonaRequestContext(personaItem, normalizedEvent));
+    if (response?.ok && typeof response.text === "string" && response.text.trim()) {
+      return {
+        ...personaItem,
+        text: response.text.trim(),
+      };
+    }
+  } catch (error) {
+    console.warn("Persona dialogue generation failed, using fallback line.", error);
+  } finally {
+    personaGenerationInFlight = false;
+  }
+
+  return personaItem;
+}
+
+function maybeQueuePersonaFromEvent(normalized) {
+  const personaItem = personaController.handleEvent(normalized, {
+    isConnected: appState.connected,
+    canSpeak: canPersonaSpeakNow(),
+  });
+
+  if (personaItem) {
+    void maybeGeneratePersonaLine(personaItem, normalized).then((resolvedItem) => {
+      enqueuePersonaBubble(resolvedItem);
+    });
+  }
+}
+
 function pushBubble(normalized) {
   const statusItem = deriveStatusBubble(normalized);
   if (statusItem) {
     dialogueQueue.enqueue(statusItem);
+    if (shouldHoldAvatarState(normalized)) {
+      personaController.noteQueueActivity("strong", normalized.timestamp || Date.now());
+    }
   }
 
   if (normalized.project) {
@@ -185,6 +333,29 @@ function pushBubble(normalized) {
       });
     }
   }
+
+  maybeQueuePersonaFromEvent(normalized);
+}
+
+function stopPersonaTicker() {
+  if (!personaTickTimer) return;
+  clearInterval(personaTickTimer);
+  personaTickTimer = null;
+}
+
+function startPersonaTicker() {
+  stopPersonaTicker();
+  personaTickTimer = setInterval(() => {
+    const personaItem = personaController.tick({
+      isConnected: appState.connected,
+      canSpeak: canPersonaSpeakNow(),
+    });
+    if (personaItem) {
+      void maybeGeneratePersonaLine(personaItem).then((resolvedItem) => {
+        enqueuePersonaBubble(resolvedItem);
+      });
+    }
+  }, PERSONA_POLL_INTERVAL_MS);
 }
 
 function connectEvents() {
@@ -290,10 +461,15 @@ function bindInteractions() {
     onState: (next) => {
       appState.interaction = { ...appState.interaction, ...next };
       applyAvatarTransformVariables();
+      scheduleBubbleLayout();
       void renderAvatarFrame();
     },
   });
   controller.mount();
+}
+
+function bindViewportLayout() {
+  window.addEventListener("resize", scheduleBubbleLayout);
 }
 
 function bindBubbleQueue() {
@@ -356,8 +532,10 @@ function bindAvatarBehaviorPreview() {
 
     appState.bubble = {
       ...appState.bubble,
-      status: `${model.name} 行为预览`,
-      text: `${payload.label || nextMotion} · motion ${nextMotion} -> ${mappedMotion} · expression ${nextMood} -> ${mappedExpression}`,
+      status: payload.previewStatus || `${model.name} 行为预览`,
+      text:
+        payload.previewText ||
+        `${payload.label || nextMotion} · motion ${nextMotion} -> ${mappedMotion} · expression ${nextMood} -> ${mappedExpression}`,
       tone: "neutral",
       channel: "system",
     };
@@ -401,17 +579,20 @@ async function initializeDesktopState() {
 }
 
 async function init() {
+  startPersonaTicker();
   bindBubbleQueue();
   bindAssistantQueue();
   await initializeDesktopState();
   await initializeRuntime();
   bindInteractions();
+  bindViewportLayout();
   bindAvatarBehaviorPreview();
   renderAll();
   connectEvents();
 }
 
 init().catch((error) => {
+  stopPersonaTicker();
   console.error(error);
   appState.avatarState = {
     ...createInitialAvatarState(),

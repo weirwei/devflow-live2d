@@ -8,6 +8,8 @@ const desktopAPI = {
   openOverlayMenu: () => ipcRenderer.invoke(IPC_CHANNELS.OPEN_MENU),
   quitApp: () => ipcRenderer.invoke(IPC_CHANNELS.QUIT),
   readTextFile: (relativePath) => ipcRenderer.invoke(IPC_CHANNELS.READ_TEXT_FILE, relativePath),
+  generatePersonaDialogue: (payload) =>
+    ipcRenderer.invoke(IPC_CHANNELS.GENERATE_PERSONA_DIALOGUE, payload),
   onPreviewAvatarState: (callback) => {
     const handler = (_event, payload) => callback(payload);
     ipcRenderer.on(IPC_CHANNELS.PREVIEW_AVATAR_STATE, handler);
