@@ -41,15 +41,6 @@ registerRuntime("mock", async ({ container }) => {
       container.dataset.motion = avatarState.motion;
       renderMockFace(container, avatarState);
     },
-    async playMotion(groupName, index = 0) {
-      const previewName = `${groupName}:${index}`;
-      container.dataset.motion = previewName;
-      renderMockFace(container, {
-        mood: container.dataset.mood || "calm",
-        expression: container.dataset.mood || "calm",
-        motion: previewName,
-      });
-    },
     destroy() {},
   };
 });
@@ -73,19 +64,6 @@ registerRuntime("external-official", async ({ container, manifest }) => {
       container.dataset.mood = avatarState.mood;
       container.dataset.motion = avatarState.motion;
       await delegate.setState(avatarState);
-    },
-    async playMotion(groupName, index = 0) {
-      const previewName = `${groupName}:${index}`;
-      container.dataset.motion = previewName;
-      if (typeof delegate.playMotion === "function") {
-        await delegate.playMotion(groupName, index);
-        return;
-      }
-      await delegate.setState({
-        mood: container.dataset.mood || "calm",
-        expression: container.dataset.mood || "calm",
-        motion: previewName,
-      });
     },
     destroy() {
       if (typeof delegate.destroy === "function") {
@@ -118,11 +96,6 @@ export class Live2DAdapter {
     if (typeof this.runtime.setInteractionState === "function") {
       this.runtime.setInteractionState(interactionState);
     }
-  }
-
-  async playMotion(groupName, index = 0) {
-    if (!this.runtime || typeof this.runtime.playMotion !== "function") return;
-    await this.runtime.playMotion(groupName, index);
   }
 
   destroy() {

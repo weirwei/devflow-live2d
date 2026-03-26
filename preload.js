@@ -8,10 +8,10 @@ const desktopAPI = {
   openOverlayMenu: () => ipcRenderer.invoke(IPC_CHANNELS.OPEN_MENU),
   quitApp: () => ipcRenderer.invoke(IPC_CHANNELS.QUIT),
   readTextFile: (relativePath) => ipcRenderer.invoke(IPC_CHANNELS.READ_TEXT_FILE, relativePath),
-  onPlayMotion: (callback) => {
+  onPreviewAvatarState: (callback) => {
     const handler = (_event, payload) => callback(payload);
-    ipcRenderer.on(IPC_CHANNELS.PLAY_MOTION, handler);
-    return () => ipcRenderer.removeListener(IPC_CHANNELS.PLAY_MOTION, handler);
+    ipcRenderer.on(IPC_CHANNELS.PREVIEW_AVATAR_STATE, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.PREVIEW_AVATAR_STATE, handler);
   },
   onOverlayState: (callback) => {
     const handler = (_event, payload) => callback(payload);

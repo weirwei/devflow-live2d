@@ -1,19 +1,26 @@
 import {
   createInitialAvatarState,
   reduceNormalizedEvent,
-  eventToBubble,
-} from "../src/avatar-state.js";
+} from "../src/avatar/avatarState.js";
+import { splitAssistantMessage } from "../src/bubble-text.js";
 import { normalizeProtocolEvent } from "../src/event-mapping/normalizeEvent.js";
 import { Live2DAdapter } from "../src/live2d-adapter.js";
 import { resolveRuntimeConfig } from "../src/live2d-config.js";
 import { InteractionController } from "../src/interaction-controller.js";
 import { DialogueQueue } from "../src/dialogue-queue.js";
+import { deriveStatusBubble } from "../src/status-bubble.js";
+import { getLive2DModelById } from "../src/live2d-model-catalog.js";
+import {
+  resolveAvatarInterrupt,
+  shouldHoldAvatarState,
+} from "../src/avatar/interruptPolicy.js";
 
 const DEFAULT_PROTOCOL_BASE_URL = "http://127.0.0.1:4317";
 
 const appState = {
   protocolBaseUrl: DEFAULT_PROTOCOL_BASE_URL,
   connected: false,
+  hasEverConnected: false,
   eventSource: null,
   avatarState: createInitialAvatarState(),
   adapter: null,
@@ -35,10 +42,14 @@ const appState = {
     hover: false,
   },
   bubble: {
-    text: "Waiting for protocol events...",
+    status: "等待连接",
+    project: "",
+    text: "",
     tone: "neutral",
     channel: "system",
   },
+  avatarInterruptGuard: null,
+  avatarInterruptTimer: null,
 };
 
 let runtimeSwitching = false;
@@ -46,10 +57,16 @@ const dialogueQueue = new DialogueQueue({
   maxSize: 40,
   defaultDurationMs: 3800,
 });
+const assistantQueue = new DialogueQueue({
+  maxSize: 80,
+  defaultDurationMs: 5200,
+});
 
 const elements = {
   shell: document.querySelector("#shell"),
   bubble: document.querySelector("#bubble"),
+  bubbleStatus: document.querySelector("#bubbleStatus"),
+  bubbleProject: document.querySelector("#bubbleProject"),
   bubbleText: document.querySelector("#bubbleText"),
   avatarStage: document.querySelector("#avatarStage"),
   avatarShell: document.querySelector("#avatarShell"),
@@ -79,14 +96,22 @@ function renderRuntimeMode() {
 }
 
 function renderBubble() {
+  const hasStatus = Boolean(appState.bubble.status && appState.bubble.status.trim());
+  const hasProject = Boolean(appState.bubble.project && appState.bubble.project.trim());
   const hasText = Boolean(appState.bubble.text && appState.bubble.text.trim());
+  const isVisible = hasStatus || hasText;
+
   elements.bubble.dataset.tone = appState.bubble.tone || "neutral";
   elements.bubble.dataset.channel = appState.bubble.channel || "system";
-  elements.bubbleText.textContent = hasText
-    ? appState.bubble.text
-    : "Waiting for protocol events...";
-  elements.bubble.classList.toggle("bubble--visible", hasText);
-  elements.bubble.classList.toggle("bubble--hidden", !hasText);
+  elements.bubbleStatus.textContent = hasStatus ? appState.bubble.status : "";
+  elements.bubbleProject.textContent = hasProject ? appState.bubble.project : "";
+  elements.bubbleText.textContent = hasText ? appState.bubble.text : "";
+  elements.bubble.classList.toggle("bubble--disconnected", !appState.connected);
+  elements.bubble.classList.toggle("bubble--with-status-text", hasStatus);
+  elements.bubble.classList.toggle("bubble--with-project", hasProject);
+  elements.bubble.classList.toggle("bubble--with-text", hasText);
+  elements.bubble.classList.toggle("bubble--visible", isVisible);
+  elements.bubble.classList.toggle("bubble--hidden", !isVisible);
 }
 
 function renderAll() {
@@ -97,8 +122,69 @@ function renderAll() {
   void renderAvatarFrame();
 }
 
+function clearAvatarInterruptTimer() {
+  if (!appState.avatarInterruptTimer) return;
+  clearTimeout(appState.avatarInterruptTimer);
+  appState.avatarInterruptTimer = null;
+}
+
+function scheduleAvatarInterruptRelease(guard) {
+  clearAvatarInterruptTimer();
+  if (!guard || !Number.isFinite(guard.until)) return;
+
+  const delay = Math.max(0, guard.until - Date.now());
+  appState.avatarInterruptTimer = setTimeout(() => {
+    appState.avatarInterruptTimer = null;
+    const activeGuard = appState.avatarInterruptGuard;
+    if (!activeGuard || activeGuard.until !== guard.until) return;
+    appState.avatarInterruptGuard = null;
+  }, delay);
+}
+
+function applyNormalizedEventToAvatar(normalized) {
+  const now = normalized.timestamp || Date.now();
+  const nextAvatarState = reduceNormalizedEvent(appState.avatarState, normalized);
+  const decision = resolveAvatarInterrupt(appState.avatarInterruptGuard, normalized, now);
+
+  if (decision.guard) {
+    appState.avatarInterruptGuard = decision.guard;
+    scheduleAvatarInterruptRelease(decision.guard);
+  } else {
+    appState.avatarInterruptGuard = null;
+    clearAvatarInterruptTimer();
+  }
+
+  if (!decision.apply) {
+    return false;
+  }
+
+  appState.avatarState = nextAvatarState;
+  return true;
+}
+
 function pushBubble(normalized) {
-  dialogueQueue.enqueue(eventToBubble(normalized));
+  const statusItem = deriveStatusBubble(normalized);
+  if (statusItem) {
+    dialogueQueue.enqueue(statusItem);
+  }
+
+  if (normalized.project) {
+    appState.bubble = {
+      ...appState.bubble,
+      project: normalized.project,
+    };
+  }
+
+  if (normalized.rawType === "assistant.message" && normalized.message) {
+    const pages = splitAssistantMessage(normalized.message);
+    for (const page of pages) {
+      assistantQueue.enqueue({
+        text: page,
+        tone: "neutral",
+        channel: "dialogue",
+      });
+    }
+  }
 }
 
 function connectEvents() {
@@ -112,6 +198,7 @@ function connectEvents() {
 
   source.addEventListener("connected", () => {
     appState.connected = true;
+    appState.hasEverConnected = true;
     pushBubble(
       normalizeProtocolEvent({
         eventType: "connected",
@@ -126,23 +213,30 @@ function connectEvents() {
     try {
       const parsed = JSON.parse(event.data);
       const normalized = normalizeProtocolEvent(parsed);
-      appState.avatarState = reduceNormalizedEvent(appState.avatarState, normalized);
+      const applied = applyNormalizedEventToAvatar(normalized);
       pushBubble(normalized);
-      void renderAvatarFrame();
+      if (applied || shouldHoldAvatarState(normalized)) {
+        void renderAvatarFrame();
+      }
     } catch (error) {
       console.error("Failed to parse protocol event payload.", error);
     }
   });
 
   source.onerror = () => {
+    const wasConnected = appState.connected;
     appState.connected = false;
-    pushBubble(
-      normalizeProtocolEvent({
-        eventType: "disconnect",
-        source: "system",
-        payload: { summary: "Lost protocol connection. Retrying..." },
-      }),
-    );
+
+    if (wasConnected) {
+      pushBubble(
+        normalizeProtocolEvent({
+          eventType: "disconnect",
+          source: "system",
+          payload: { summary: "Lost protocol connection. Retrying..." },
+        }),
+      );
+    }
+
     renderAll();
   };
 }
@@ -206,7 +300,9 @@ function bindBubbleQueue() {
   dialogueQueue.subscribe((item) => {
     if (!item) {
       appState.bubble = {
-        text: "",
+        status: appState.connected ? "" : appState.hasEverConnected ? "" : "等待连接",
+        project: appState.bubble.project,
+        text: appState.bubble.text,
         tone: "neutral",
         channel: "system",
       };
@@ -215,7 +311,9 @@ function bindBubbleQueue() {
     }
 
     appState.bubble = {
-      text: item.text,
+      status: item.text,
+      project: appState.bubble.project,
+      text: appState.bubble.text,
       tone: item.tone,
       channel: item.channel,
     };
@@ -223,10 +321,48 @@ function bindBubbleQueue() {
   });
 }
 
-function bindMotionPreview() {
-  window.desktopAPI?.onPlayMotion?.(({ groupName, index } = {}) => {
-    if (!groupName || !appState.adapter) return;
-    void appState.adapter.playMotion(groupName, index);
+function bindAssistantQueue() {
+  assistantQueue.subscribe((item) => {
+    appState.bubble = {
+      ...appState.bubble,
+      text: item?.text || "",
+      tone: item?.tone || appState.bubble.tone,
+      channel: item?.channel || appState.bubble.channel,
+    };
+    renderBubble();
+  });
+}
+
+function bindAvatarBehaviorPreview() {
+  window.desktopAPI?.onPreviewAvatarState?.((payload = {}) => {
+    appState.avatarInterruptGuard = null;
+    clearAvatarInterruptTimer();
+    const nextMood = payload.mood || "calm";
+    const nextMotion = payload.motion || "idleWave";
+    const nextExpression = payload.expression || nextMood;
+    const model = getLive2DModelById(appState.runtime.selectedModelId);
+    const mappedMotion = model?.motions?.[nextMotion] || nextMotion;
+    const mappedExpression = model?.expressions?.[nextMood] || nextExpression;
+
+    appState.avatarState = {
+      ...appState.avatarState,
+      mood: nextMood,
+      motion: nextMotion,
+      expression: nextExpression,
+      lastEventType: "tray.preview",
+      source: payload.source || "tray-preview",
+      updatedAt: Date.now(),
+    };
+
+    appState.bubble = {
+      ...appState.bubble,
+      status: `${model.name} 行为预览`,
+      text: `${payload.label || nextMotion} · motion ${nextMotion} -> ${mappedMotion} · expression ${nextMood} -> ${mappedExpression}`,
+      tone: "neutral",
+      channel: "system",
+    };
+
+    renderAll();
   });
 }
 
@@ -266,10 +402,11 @@ async function initializeDesktopState() {
 
 async function init() {
   bindBubbleQueue();
+  bindAssistantQueue();
   await initializeDesktopState();
   await initializeRuntime();
   bindInteractions();
-  bindMotionPreview();
+  bindAvatarBehaviorPreview();
   renderAll();
   connectEvents();
 }
@@ -283,6 +420,8 @@ init().catch((error) => {
     motion: "shake",
   };
   appState.bubble = {
+    status: "初始化失败",
+    project: appState.bubble.project,
     text: "Failed to initialize the desktop overlay.",
     tone: "warning",
     channel: "error",

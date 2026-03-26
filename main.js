@@ -17,6 +17,12 @@ import {
   getLive2DModelById,
 } from "./src/live2d-model-catalog.js";
 import { IPC_CHANNELS } from "./src/ipc-channels.js";
+import {
+  createCenteredWindowBounds,
+  normalizeWindowBounds,
+  resolveWindowBounds,
+  sameWindowBounds,
+} from "./src/app/window-bounds.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SETTINGS_FILE_NAME = "devflow-live2d-settings.json";
@@ -25,21 +31,17 @@ const SCALE_MIN = 50;
 const SCALE_MAX = 150;
 const DEFAULT_PROTOCOL_BASE_URL =
   process.env.DEVFLOW_PROTOCOL_URL?.trim() || "http://127.0.0.1:4317";
-
-const DEFAULT_STATE = {
-  protocolBaseUrl: DEFAULT_PROTOCOL_BASE_URL,
-  clickThrough: false,
-  alwaysOnTop: true,
-  allWorkspaces: true,
-  hidden: false,
-  panelCollapsed: true,
-  selectedModelId: DEFAULT_LIVE2D_MODEL_ID,
-  avatarTuning: {
-    scale: 100,
-    offsetX: 0,
-    offsetY: 0,
-  },
-};
+const OVERLAY_WIDTH = 420;
+const OVERLAY_HEIGHT = 720;
+const AVATAR_BEHAVIOR_PRESETS = [
+  { key: "idleWave", mood: "calm", label: "空闲", description: "待机 / 轻微呼吸" },
+  { key: "acknowledge", mood: "attentive", label: "响应", description: "收到任务 / 点头" },
+  { key: "greet", mood: "alert", label: "招呼", description: "新请求 / 提醒" },
+  { key: "workLoop", mood: "focus", label: "工作中", description: "执行中 / 专注" },
+  { key: "ponder", mood: "thinking", label: "思考", description: "推理 / 犹豫" },
+  { key: "celebrate", mood: "happy", label: "完成", description: "成功 / 开心" },
+  { key: "shake", mood: "alert", label: "警示", description: "失败 / 摇头" },
+];
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
@@ -80,44 +82,52 @@ function normalizeProtocolBaseUrl(value, fallback = DEFAULT_PROTOCOL_BASE_URL) {
   return trimmed || fallback;
 }
 
-function getMotionPreviewOptions(model) {
-  if (!model?.manifestModel?.basePath || !model?.manifestModel?.modelJson) {
-    return [];
-  }
+function createDefaultState() {
+  return {
+    protocolBaseUrl: DEFAULT_PROTOCOL_BASE_URL,
+    clickThrough: false,
+    alwaysOnTop: true,
+    allWorkspaces: true,
+    hidden: false,
+    panelCollapsed: true,
+    selectedModelId: DEFAULT_LIVE2D_MODEL_ID,
+    avatarTuning: {
+      scale: 100,
+      offsetX: 0,
+      offsetY: 0,
+    },
+    windowBounds: {
+      x: 0,
+      y: 0,
+      width: OVERLAY_WIDTH,
+      height: OVERLAY_HEIGHT,
+    },
+  };
+}
 
-  try {
-    const modelJsonPath = path.join(
-      __dirname,
-      model.manifestModel.basePath,
-      model.manifestModel.modelJson,
-    );
-    const raw = fs.readFileSync(modelJsonPath, "utf-8");
-    const parsed = JSON.parse(raw);
-    const motions = parsed?.FileReferences?.Motions;
-    if (!motions || typeof motions !== "object") {
-      return [];
-    }
-    return Object.entries(motions).flatMap(([groupName, items]) => {
-      if (!Array.isArray(items)) {
-        return [];
-      }
-      return items.map((item, index) => {
-        const file = typeof item?.File === "string" ? item.File : `${groupName} #${index + 1}`;
-        return {
-          groupName,
-          index,
-          file,
-          label: `${groupName} / ${file}`,
-        };
-      });
-    });
-  } catch {
-    return [];
-  }
+const DEFAULT_STATE = createDefaultState();
+
+function getAvatarBehaviorPreviewOptions(model) {
+  const motionMap = model?.motions || {};
+  const expressionMap = model?.expressions || {};
+
+  return AVATAR_BEHAVIOR_PRESETS.map((preset) => {
+    const mappedMotion = motionMap[preset.key] || preset.key;
+    const mappedExpression = expressionMap[preset.mood] || preset.mood;
+    return {
+      ...preset,
+      mappedMotion,
+      mappedExpression,
+      label: `${preset.label} · ${preset.key} -> ${mappedMotion}${
+        mappedExpression ? ` · 表情 ${mappedExpression}` : ""
+      }`,
+    };
+  });
 }
 
 function buildState(partial = {}, current = DEFAULT_STATE) {
   const model = getLive2DModelById(partial.selectedModelId ?? current.selectedModelId);
+  const fallbackWindowBounds = current.windowBounds ?? DEFAULT_STATE.windowBounds;
   return {
     ...current,
     ...partial,
@@ -130,6 +140,7 @@ function buildState(partial = {}, current = DEFAULT_STATE) {
       ...current.avatarTuning,
       ...(partial.avatarTuning || {}),
     }),
+    windowBounds: normalizeWindowBounds(partial.windowBounds, fallbackWindowBounds),
   };
 }
 
@@ -142,6 +153,7 @@ class OverlayStateStore {
     return {
       ...this.state,
       avatarTuning: { ...this.state.avatarTuning },
+      windowBounds: this.state.windowBounds ? { ...this.state.windowBounds } : null,
       selectedModel: getLive2DModelById(this.state.selectedModelId),
     };
   }
@@ -209,25 +221,39 @@ class LocalFileGateway {
 }
 
 class OverlayWindowController {
-  constructor({ rootDir, onFocusChange, onCloseRequest, onHideRequested }) {
+  constructor({
+    rootDir,
+    onFocusChange,
+    onCloseRequest,
+    onHideRequested,
+    getWindowBounds,
+    onWindowBoundsChange,
+  }) {
     this.rootDir = rootDir;
     this.onFocusChange = onFocusChange;
     this.onCloseRequest = onCloseRequest;
     this.onHideRequested = onHideRequested;
+    this.getWindowBounds = getWindowBounds;
+    this.onWindowBoundsChange = onWindowBoundsChange;
     this.window = null;
+    this.lastBounds = null;
   }
 
   create() {
-    const display = screen.getPrimaryDisplay();
-    const { x: workX, y: workY, width, height } = display.workArea;
-    const overlayWidth = 420;
-    const overlayHeight = 720;
+    const displays = screen.getAllDisplays();
+    const primaryDisplay = screen.getPrimaryDisplay();
+    const workAreas = displays.map((display) => display.workArea);
+    const resolvedBounds = resolveWindowBounds(this.getWindowBounds?.(), {
+      primaryWorkArea: primaryDisplay?.workArea,
+      workAreas,
+    });
+    this.lastBounds = resolvedBounds;
 
     this.window = new BrowserWindow({
-      width: overlayWidth,
-      height: overlayHeight,
-      x: Math.round(workX + (width - overlayWidth) / 2),
-      y: Math.round(workY + (height - overlayHeight) / 2),
+      width: resolvedBounds.width,
+      height: resolvedBounds.height,
+      x: resolvedBounds.x,
+      y: resolvedBounds.y,
       frame: false,
       transparent: true,
       hasShadow: false,
@@ -270,10 +296,13 @@ class OverlayWindowController {
     });
     this.window.on("closed", () => {
       this.window = null;
+      this.lastBounds = null;
       this.onFocusChange(false);
     });
     this.window.on("focus", () => this.onFocusChange(true));
     this.window.on("blur", () => this.onFocusChange(false));
+    this.window.on("moved", () => this.handleBoundsChanged());
+    this.window.on("resized", () => this.handleBoundsChanged());
 
     return this.window;
   }
@@ -289,8 +318,25 @@ class OverlayWindowController {
     this.window?.webContents.send(channel, payload);
   }
 
+  handleBoundsChanged() {
+    if (!this.window) return;
+    const nextBounds = normalizeWindowBounds(this.window.getBounds(), this.lastBounds);
+    if (!nextBounds || sameWindowBounds(nextBounds, this.lastBounds)) return;
+    this.lastBounds = nextBounds;
+    this.onWindowBoundsChange?.(nextBounds);
+  }
+
   applyMode(state) {
     if (!this.window) return;
+
+    const resolvedBounds = resolveWindowBounds(state.windowBounds, {
+      primaryWorkArea: screen.getPrimaryDisplay()?.workArea,
+      workAreas: screen.getAllDisplays().map((display) => display.workArea),
+    });
+    if (!sameWindowBounds(resolvedBounds, this.lastBounds)) {
+      this.lastBounds = resolvedBounds;
+      this.window.setBounds(resolvedBounds, false);
+    }
 
     if (state.alwaysOnTop) {
       this.window.setAlwaysOnTop(true, "screen-saver");
@@ -376,6 +422,10 @@ class DesktopApp {
       },
       onCloseRequest: () => this.isQuitting,
       onHideRequested: () => this.hideOverlay(),
+      getWindowBounds: () => this.store.get().windowBounds,
+      onWindowBoundsChange: (windowBounds) => {
+        this.updateState({ windowBounds }, { broadcast: false });
+      },
     });
     this.tray = new TrayController(() => this.buildTrayMenu());
   }
@@ -424,7 +474,7 @@ class DesktopApp {
     const currentModel = getLive2DModelById(state.selectedModelId);
     const currentModelId = currentModel.id;
     const presetScales = [50, 60, 70, 80, 100, 120];
-    const motionOptions = getMotionPreviewOptions(currentModel);
+    const behaviorOptions = getAvatarBehaviorPreviewOptions(currentModel);
 
     return Menu.buildFromTemplate([
       {
@@ -463,23 +513,25 @@ class DesktopApp {
         })),
       },
       {
-        label: "播放 Motion",
+        label: "模型行为预览",
         submenu:
-          motionOptions.length > 0
-            ? motionOptions.map((motion) => ({
-                label: motion.label,
+          behaviorOptions.length > 0
+            ? behaviorOptions.map((behavior) => ({
+                label: behavior.label,
                 click: () => {
                   console.log(
-                    `[devflow-live2d] preview motion ${motion.groupName}[${motion.index}] ${motion.file}`,
+                    `[devflow-live2d] preview behavior ${currentModel.id} ${behavior.key} -> ${behavior.mappedMotion} / ${behavior.mappedExpression}`,
                   );
-                  this.overlay.broadcast(IPC_CHANNELS.PLAY_MOTION, {
-                    groupName: motion.groupName,
-                    index: motion.index,
-                    file: motion.file,
+                  this.overlay.broadcast(IPC_CHANNELS.PREVIEW_AVATAR_STATE, {
+                    mood: behavior.mood,
+                    expression: behavior.mood,
+                    motion: behavior.key,
+                    source: "tray-preview",
+                    label: behavior.description,
                   });
                 },
               }))
-            : [{ label: "当前模型无可用 Motion", enabled: false }],
+            : [{ label: "当前模型无可用行为", enabled: false }],
       },
       {
         label: "角色大小",

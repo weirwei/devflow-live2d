@@ -4,6 +4,6 @@ export const IPC_CHANNELS = {
   OPEN_MENU: "overlay:openMenu",
   QUIT: "overlay:quit",
   READ_TEXT_FILE: "overlay:readTextFile",
-  PLAY_MOTION: "overlay:playMotion",
+  PREVIEW_AVATAR_STATE: "overlay:previewAvatarState",
   STATE_BROADCAST: "overlay-state",
 };

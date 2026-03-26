@@ -26,15 +26,6 @@ function emotionFromKind(kind, taskStatus) {
   return "calm";
 }
 
-function mapBubbleTone(kind) {
-  if (kind === "error") return "warning";
-  if (kind === "work-result") return "success";
-  if (kind === "request") return "alert";
-  if (kind === "thinking") return "thinking";
-  if (kind === "usage") return "neutral";
-  return "neutral";
-}
-
 export function createInitialAvatarState() {
   return {
     mood: "calm",
@@ -61,31 +52,5 @@ export function reduceNormalizedEvent(previousState, event) {
     lastEventType: event.rawType,
     source: event.source,
     updatedAt: event.timestamp || Date.now(),
-  };
-}
-
-export function eventToBubble(event) {
-  const fixedCopy = {
-    request: "收到新请求。",
-    task: "任务有更新。",
-    work: "正在处理中。",
-    thinking: "正在思考……",
-    "work-result": "任务已完成。",
-    dialogue: "助手已回复。",
-    usage: "用量已更新。",
-    connection: "连接已恢复。",
-    error: "连接出了点问题。",
-    other: "收到新动态。",
-  };
-
-  const isAssistantMessage = event.rawType === "assistant.message" && event.message;
-  const text = isAssistantMessage
-    ? event.message
-    : fixedCopy[event.kind] || "收到新动态。";
-
-  return {
-    text,
-    tone: mapBubbleTone(event.kind),
-    channel: event.kind,
   };
 }

@@ -129,8 +129,9 @@ async function createPreviewFallback(container, manifest) {
       if (eyes) eyes.textContent = "";
       if (mouth) mouth.textContent = "";
     },
-    async playMotion(groupName, index = 0) {
-      container.dataset.motion = `${groupName}:${index}`;
+    destroy() {
+      preview.removeAttribute("src");
+      preview.remove();
     },
   };
 }
@@ -144,6 +145,7 @@ async function createOfficialAdapter({ container, manifest }) {
   }
 
   const root = ensureRuntimeRoot(container);
+  root.replaceChildren();
   const baseUrl = toRuntimeModuleUrl("official-demo-runtime/dist/");
   const modelLayout = {
     runtimeWidth: manifest.model?.runtimeWidth,
@@ -166,6 +168,10 @@ async function createOfficialAdapter({ container, manifest }) {
   const runtimeApi = window.DevflowEmbeddedLive2D || window.BackstageEmbeddedLive2D;
   if (!runtimeApi || typeof runtimeApi.initialize !== "function") {
     throw new Error("Official runtime did not expose an embedded Live2D initialize() API.");
+  }
+
+  if (typeof runtimeApi.dispose === "function") {
+    runtimeApi.dispose();
   }
 
   if (
@@ -204,19 +210,12 @@ async function createOfficialAdapter({ container, manifest }) {
         runtimeApi.setState(state);
       }
     },
-    async playMotion(groupName, index = 0) {
-      container.dataset.motion = `${groupName}:${index}`;
-      if (typeof runtimeApi.playMotion === "function") {
-        runtimeApi.playMotion(groupName, index);
-        return;
+    destroy() {
+      if (typeof runtimeApi.dispose === "function") {
+        runtimeApi.dispose();
       }
-      if (typeof runtimeApi.setState === "function") {
-        runtimeApi.setState({
-          mood: container.dataset.mood || "calm",
-          expression: container.dataset.mood || "calm",
-          motion: `${groupName}:${index}`,
-        });
-      }
+      root.replaceChildren();
+      root.remove();
     },
   };
 }

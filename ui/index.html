@@ -9,8 +9,12 @@
   <body>
     <main class="shell" id="shell">
       <section class="bubble bubble--hidden" id="bubble">
-        <div class="bubble__label">Devflow</div>
-        <div class="bubble__text" id="bubbleText">Waiting for protocol events...</div>
+        <div class="bubble__status-text" id="bubbleStatus"></div>
+        <div class="bubble__status">
+          <span class="bubble__status-dot" id="bubbleStatusDot" aria-hidden="true"></span>
+          <div class="bubble__project" id="bubbleProject"></div>
+        </div>
+        <div class="bubble__text" id="bubbleText"></div>
       </section>
 
       <section class="avatar-stage" id="avatarStage">

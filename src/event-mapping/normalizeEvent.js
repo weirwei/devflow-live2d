@@ -56,6 +56,17 @@ function pickUsageSnapshot(payload) {
   };
 }
 
+function pickProject(entry, payload) {
+  return truncate(
+    entry.project ||
+      entry.task?.project ||
+      payload.project ||
+      payload.data?.project ||
+      "",
+    120,
+  );
+}
+
 function normalizeKind(type) {
   if (type === "request.created") return "request";
   if (type === "task.created" || type === "task.updated" || type === "task.assigned") return "task";
@@ -75,6 +86,7 @@ export function normalizeProtocolEvent(entry = {}) {
   const message = pickMessage(entry, payload);
   const task = pickTaskSnapshot(entry.task, message);
   const usage = pickUsageSnapshot(payload);
+  const project = pickProject(entry, payload);
 
   return {
     kind,
@@ -84,6 +96,7 @@ export function normalizeProtocolEvent(entry = {}) {
     message,
     task,
     usage,
+    project,
     raw: entry,
   };
 }
