@@ -129,7 +129,11 @@ export class DesktopServiceRuntime {
   }
 
   resolveCommandBinary(command) {
-    const result = spawnSync("which", [command], {
+    // Use login shell to resolve command path, so that PATH from
+    // shell profile (nvm, homebrew, etc.) is available even in
+    // packaged macOS .app where GUI processes get a minimal PATH.
+    const shell = process.env.SHELL || "/bin/zsh";
+    const result = spawnSync(shell, ["-lc", `which ${command}`], {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "ignore"],
     });
