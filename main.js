@@ -26,13 +26,10 @@ import {
   sameWindowBounds,
 } from "./src/app/window-bounds.js";
 import { DesktopServiceRuntime } from "./src/app/service-runtime.js";
-import { execFile } from "child_process";
 import {
   DEFAULT_PERSONA_API_URL,
   DEFAULT_PERSONA_MODEL,
   DEFAULT_PERSONA_TIMEOUT_MS,
-  DEFAULT_CLAUDE_CODE_MODEL,
-  PERSONA_PROVIDERS,
   buildPersonaDialoguePrompt,
   createDefaultPersonaDialogueSettings,
   getPersonaDialogueConfig,
@@ -120,49 +117,6 @@ function resolvePersonaDialogueErrorText(response = {}) {
   return "AI 暂时不可用";
 }
 
-function runClaudeCode(promptText, model, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const args = [
-      "-p", promptText,
-      "--bare",
-      "--model", model || DEFAULT_CLAUDE_CODE_MODEL,
-      "--no-session-persistence",
-      "--tools", "",
-    ];
-    const child = execFile("claude", args, {
-      timeout: timeoutMs,
-      maxBuffer: 1024 * 64,
-      env: { ...process.env, CLAUDE_CODE_SIMPLE: "1" },
-    }, (error, stdout, stderr) => {
-      if (error) {
-        reject(error);
-      } else {
-        resolve(stdout);
-      }
-    });
-  });
-}
-
-async function generatePersonaDialogueViaClaude(input, config) {
-  const prompt = `${PERSONA_DIALOGUE_SYSTEM_PROMPT}\n\n${buildPersonaDialoguePrompt(input)}`;
-
-  try {
-    const rawText = await runClaudeCode(prompt, config.model, config.timeoutMs);
-    const text = sanitizePersonaDialogueText(rawText, input.fallbackText || "");
-    if (!text) {
-      return { ok: false, text: "", reason: "empty" };
-    }
-    return { ok: true, text, provider: "claude-code", model: config.model };
-  } catch (error) {
-    return {
-      ok: false,
-      text: "",
-      reason: error?.killed ? "timeout" : "exec",
-      error: error instanceof Error ? error.message : String(error),
-    };
-  }
-}
-
 async function generatePersonaDialogueViaApi(input, config) {
   const prompt = buildPersonaDialoguePrompt(input);
   const apiUrl = resolvePersonaApiUrl(config.apiUrl);
@@ -238,9 +192,6 @@ async function generatePersonaDialogue(input = {}, settings = {}, env = process.
     return { ok: false, text: "", reason: "disabled" };
   }
 
-  if (config.provider === "claude-code") {
-    return generatePersonaDialogueViaClaude(input, config);
-  }
   return generatePersonaDialogueViaApi(input, config);
 }
 
@@ -853,20 +804,8 @@ class DesktopApp {
           },
           { type: "separator" },
           {
-            label: "模型源",
-            submenu: PERSONA_PROVIDERS.map((p) => ({
-              label: p === "claude-code" ? "Claude Code (本地)" : "OpenAI 兼容 API",
-              type: "radio",
-              checked: personaProvider === p,
-              click: () =>
-                this.updateState({
-                  personaDialogue: {
-                    ...state.personaDialogue,
-                    provider: p,
-                    model: p === "claude-code" ? DEFAULT_CLAUDE_CODE_MODEL : DEFAULT_PERSONA_MODEL,
-                  },
-                }),
-            })),
+            label: "模型源: OpenAI 兼容 API",
+            enabled: false,
           },
           {
             label: `模型: ${personaConfig.model} (配置文件)`,
@@ -942,7 +881,7 @@ class DesktopApp {
               },
               {
                 label: runtimeStatus.protocol.running ? "停止 devflow-protocol" : "启动 devflow-protocol",
-                enabled: runtimeStatus.capabilities.bun,
+                enabled: true,
                 click: this.withMenuAction("toggle protocol", async () => {
                   if (this.runtime.getStatus().protocol.running) {
                     await this.runtime.stopProtocol();
@@ -964,8 +903,7 @@ class DesktopApp {
               },
               {
                 label: runtimeStatus.claudePlugin.installed ? "卸载 Claude 全局插件" : "安装 Claude 全局插件",
-                enabled:
-                  runtimeStatus.capabilities.bun && runtimeStatus.capabilities.jq && runtimeStatus.capabilities.bash,
+                enabled: runtimeStatus.capabilities.bash && runtimeStatus.capabilities.node,
                 click: this.withMenuAction("toggle Claude plugin", async () => {
                   if (this.runtime.getStatus().claudePlugin.installed) {
                     await this.runtime.uninstallClaudeGlobalPlugin();

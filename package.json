@@ -43,13 +43,6 @@
         "filter": [
           "**/*"
         ]
-      },
-      {
-        "from": "build-resources/runtime-tools",
-        "to": "runtime-tools",
-        "filter": [
-          "**/*"
-        ]
       }
     ],
     "mac": {

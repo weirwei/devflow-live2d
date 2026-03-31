@@ -4,16 +4,10 @@ import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, "..");
-const sourceProtocolRoot = path.resolve(projectRoot, "..", "devflow-protocol");
+const sourceProtocolRoot = path.resolve(projectRoot, "..", "devflow-protocol-go");
 const buildResourcesRoot = path.join(projectRoot, "build-resources");
 const bundleRoot = path.join(buildResourcesRoot, "bundle");
-const targetProtocolRoot = path.join(bundleRoot, "devflow-protocol");
-const runtimeToolsRoot = path.join(buildResourcesRoot, "runtime-tools");
-const runtimeToolsBinRoot = path.join(runtimeToolsRoot, "bin");
-const toolSources = {
-  bun: process.env.BUN_PATH || "/Users/weirwei/.bun/bin/bun",
-  jq: process.env.JQ_PATH || "/usr/bin/jq",
-};
+const targetProtocolRoot = path.join(bundleRoot, "devflow-protocol-go");
 
 function ensureExists(targetPath, label) {
   if (!fs.existsSync(targetPath)) {
@@ -36,29 +30,29 @@ function copyDir(source, target) {
   });
 }
 
-function copyTool(name, sourcePath) {
-  ensureExists(sourcePath, `${name} binary`);
-  fs.mkdirSync(runtimeToolsBinRoot, { recursive: true });
-  const targetPath = path.join(runtimeToolsBinRoot, name);
-  fs.copyFileSync(sourcePath, targetPath);
-  fs.chmodSync(targetPath, 0o755);
-  return targetPath;
-}
-
 function main() {
-  ensureExists(sourceProtocolRoot, "devflow-protocol source");
-  ensureExists(path.join(sourceProtocolRoot, "src", "server.ts"), "devflow-protocol server");
+  const protocolBinary = path.join(sourceProtocolRoot, "bin", "devflow-protocol");
+  const pluginDir = path.join(sourceProtocolRoot, "claude-plugin");
+
+  ensureExists(sourceProtocolRoot, "devflow-protocol-go source");
+  ensureExists(protocolBinary, "devflow-protocol binary");
+  ensureExists(pluginDir, "claude-plugin directory");
+
   fs.rmSync(targetProtocolRoot, { recursive: true, force: true });
-  fs.rmSync(runtimeToolsRoot, { recursive: true, force: true });
   fs.mkdirSync(bundleRoot, { recursive: true });
 
-  copyDir(sourceProtocolRoot, targetProtocolRoot);
-  const copiedTools = Object.entries(toolSources).map(([name, sourcePath]) =>
-    `${name} -> ${copyTool(name, sourcePath)}`,
-  );
+  // Copy binary
+  const targetBinDir = path.join(targetProtocolRoot, "bin");
+  fs.mkdirSync(targetBinDir, { recursive: true });
+  const targetBinary = path.join(targetBinDir, "devflow-protocol");
+  fs.copyFileSync(protocolBinary, targetBinary);
+  fs.chmodSync(targetBinary, 0o755);
 
-  console.log(`[prepare-bundle-resources] copied devflow-protocol -> ${targetProtocolRoot}`);
-  console.log(`[prepare-bundle-resources] copied runtime tools: ${copiedTools.join(", ")}`);
+  // Copy claude-plugin
+  copyDir(pluginDir, path.join(targetProtocolRoot, "claude-plugin"));
+
+  console.log(`[prepare-bundle-resources] copied devflow-protocol binary -> ${targetBinary}`);
+  console.log(`[prepare-bundle-resources] copied claude-plugin -> ${path.join(targetProtocolRoot, "claude-plugin")}`);
 }
 
 main();

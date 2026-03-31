@@ -1,9 +1,8 @@
 export const DEFAULT_PERSONA_MODEL = process.env.DEVFLOW_DIALOGUE_MODEL?.trim() || "gpt-5-mini";
 export const DEFAULT_PERSONA_API_URL =
   process.env.DEVFLOW_DIALOGUE_API_URL?.trim() || "https://api.openai.com/v1/chat/completions";
-export const DEFAULT_PERSONA_TIMEOUT_MS = 8_000;
-export const DEFAULT_CLAUDE_CODE_MODEL = "haiku";
-export const PERSONA_PROVIDERS = ["openai-compatible", "claude-code"];
+export const DEFAULT_PERSONA_TIMEOUT_MS = 30_000;
+export const PERSONA_PROVIDERS = ["openai-compatible"];
 
 function firstLine(text) {
   return String(text || "")
@@ -83,15 +82,14 @@ export function resolvePersonaDialogueConfig(settings = {}, env = process.env) {
   );
   const provider = normalized.provider;
   const apiKey = normalized.apiKey || envConfig.apiKey;
-  const isClaudeCode = provider === "claude-code";
-  const configured = isClaudeCode || Boolean(apiKey);
+  const configured = Boolean(apiKey);
 
   return {
     enabled: Boolean(normalized.enabled && configured),
     provider,
     apiKey,
     apiUrl: normalizeApiUrl(normalized.apiUrl, envConfig.apiUrl),
-    model: isClaudeCode ? (normalized.model || DEFAULT_CLAUDE_CODE_MODEL) : (normalized.model || envConfig.model),
+    model: normalized.model || envConfig.model,
     timeoutMs: normalized.timeoutMs || envConfig.timeoutMs,
     configured,
   };

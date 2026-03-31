@@ -72,32 +72,21 @@ export class DesktopServiceRuntime {
 
   getBundleRoot() {
     if (this.app.isPackaged) {
-      return path.join(process.resourcesPath, "bundle", "devflow-protocol");
+      return path.join(process.resourcesPath, "bundle", "devflow-protocol-go");
     }
-    return path.resolve(this.rootDir, "..", "..", "devflow-protocol");
-  }
-
-  getRuntimeToolRoot() {
-    if (this.app.isPackaged) {
-      return path.join(process.resourcesPath, "runtime-tools");
-    }
-    return path.resolve(this.rootDir, "..", "build-resources", "runtime-tools");
-  }
-
-  getBundledToolPath(toolName) {
-    return path.join(this.getRuntimeToolRoot(), "bin", toolName);
+    return path.resolve(this.rootDir, "..", "devflow-protocol-go");
   }
 
   getProtocolSourceRoot() {
     return this.getBundleRoot();
   }
 
-  getProtocolServerScript() {
-    return path.join(this.getProtocolSourceRoot(), "src", "server.ts");
+  getProtocolBinary() {
+    return path.join(this.getProtocolSourceRoot(), "bin", "devflow-protocol");
   }
 
   getClaudePluginSourceRoot() {
-    return this.getBundleRoot();
+    return path.join(this.getBundleRoot(), "claude-plugin");
   }
 
   getClaudePluginInstallRoot() {
@@ -134,9 +123,8 @@ export class DesktopServiceRuntime {
 
   getHostCapabilities() {
     return {
-      bun: this.resolveToolBinary("bun"),
-      bash: this.resolveToolBinary("bash"),
-      jq: this.resolveToolBinary("jq"),
+      bash: this.resolveCommandBinary("bash"),
+      node: this.resolveCommandBinary("node"),
     };
   }
 
@@ -147,24 +135,6 @@ export class DesktopServiceRuntime {
     });
     if (result.status !== 0) return "";
     return String(result.stdout || "").trim();
-  }
-
-  resolveToolBinary(command) {
-    const bundled = this.getBundledToolPath(command);
-    if (fs.existsSync(bundled)) return bundled;
-    return this.resolveCommandBinary(command);
-  }
-
-  buildBundledPathEnv() {
-    const pathEntries = [];
-    const bundledBinDir = path.join(this.getRuntimeToolRoot(), "bin");
-    if (fs.existsSync(bundledBinDir)) {
-      pathEntries.push(bundledBinDir);
-    }
-    if (process.env.PATH) {
-      pathEntries.push(process.env.PATH);
-    }
-    return pathEntries.join(path.delimiter);
   }
 
   getStatus() {
@@ -182,9 +152,8 @@ export class DesktopServiceRuntime {
         settingsPath: this.getClaudeSettingsPath(),
       },
       capabilities: {
-        bun: Boolean(capabilities.bun),
         bash: Boolean(capabilities.bash),
-        jq: Boolean(capabilities.jq),
+        node: Boolean(capabilities.node),
       },
     };
   }
@@ -215,7 +184,6 @@ export class DesktopServiceRuntime {
       cwd,
       env: {
         ...process.env,
-        PATH: this.buildBundledPathEnv(),
         ...env,
       },
       stdio: ["ignore", "pipe", "pipe"],
@@ -266,27 +234,19 @@ export class DesktopServiceRuntime {
   async startProtocol() {
     if (this.processes.protocol) return this.getStatus().protocol;
 
-    const bunBinary = this.resolveToolBinary("bun");
-    if (!bunBinary) {
-      this.lastErrors.protocol = "bun is required to run bundled devflow-protocol";
-      throw new Error(this.lastErrors.protocol);
-    }
-
-    const protocolRoot = this.getProtocolSourceRoot();
-    const serverScript = this.getProtocolServerScript();
-    this.verifySourceExists(serverScript, "devflow-protocol server");
+    const protocolBinary = this.getProtocolBinary();
+    this.verifySourceExists(protocolBinary, "devflow-protocol binary");
     this.ensurePathsForRuntime();
 
     this.spawnManagedProcess({
       key: "protocol",
-      command: bunBinary,
-      args: ["run", "src/server.ts"],
-      cwd: protocolRoot,
+      command: protocolBinary,
+      args: [],
+      cwd: this.getProtocolSourceRoot(),
       env: {
         HOST: PROTOCOL_HOST,
         PORT: String(PROTOCOL_PORT),
         DEVFLOW_PROTOCOL_DIR: this.getProtocolDataDir(),
-        DEVFLOW_PROTOCOL_HISTORY: path.join(this.getProtocolDataDir(), "history.jsonl"),
       },
       logPath: this.getProtocolLogPath(),
       label: "protocol",
@@ -416,7 +376,7 @@ export class DesktopServiceRuntime {
   }
 
   buildClaudeHookCommand(fileName) {
-    const bashBinary = this.resolveToolBinary("bash") || "bash";
+    const bashBinary = this.resolveCommandBinary("bash") || "bash";
     return `${shellQuote(bashBinary)} ${shellQuote(path.join(this.getClaudePluginInstallRoot(), "hooks", fileName))}`;
   }
 
@@ -449,13 +409,12 @@ export class DesktopServiceRuntime {
 
     settings.mcpServers =
       typeof settings.mcpServers === "object" && settings.mcpServers ? settings.mcpServers : {};
-    const bunBinary = this.resolveToolBinary("bun") || "bun";
+    const nodeBinary = this.resolveCommandBinary("node") || "node";
     settings.mcpServers[CLAUDE_MCP_SERVER_NAME] = {
-      command: bunBinary,
-      args: ["run", path.join(pluginRoot, "mcp", "server.mjs")],
+      command: nodeBinary,
+      args: [path.join(pluginRoot, "mcp", "server.mjs")],
       env: {
         DEVFLOW_PROTOCOL_URL: this.protocolBaseUrl,
-        PATH: this.buildBundledPathEnv(),
       },
     };
 
@@ -505,9 +464,8 @@ export class DesktopServiceRuntime {
   validatePluginInstallDependencies() {
     const capabilities = this.getHostCapabilities();
     const missing = [];
-    if (!capabilities.jq) missing.push("jq");
     if (!capabilities.bash) missing.push("bash");
-    if (!capabilities.bun) missing.push("bun");
+    if (!capabilities.node) missing.push("node");
     if (missing.length > 0) {
       throw new Error(`Claude plugin requires: ${missing.join(", ")}`);
     }
