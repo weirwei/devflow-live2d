@@ -10,3 +10,4 @@ claude.md
 .spec-workflow
 build-resources/
 dist/
+.claude

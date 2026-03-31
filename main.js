@@ -26,10 +26,13 @@ import {
   sameWindowBounds,
 } from "./src/app/window-bounds.js";
 import { DesktopServiceRuntime } from "./src/app/service-runtime.js";
+import { execFile } from "child_process";
 import {
   DEFAULT_PERSONA_API_URL,
   DEFAULT_PERSONA_MODEL,
   DEFAULT_PERSONA_TIMEOUT_MS,
+  DEFAULT_CLAUDE_CODE_MODEL,
+  PERSONA_PROVIDERS,
   buildPersonaDialoguePrompt,
   createDefaultPersonaDialogueSettings,
   getPersonaDialogueConfig,
@@ -117,12 +120,50 @@ function resolvePersonaDialogueErrorText(response = {}) {
   return "AI 暂时不可用";
 }
 
-async function generatePersonaDialogue(input = {}, settings = {}, env = process.env) {
-  const config = resolvePersonaDialogueConfig(settings, env);
-  if (!config.enabled) {
-    return { ok: false, text: "", reason: "disabled" };
-  }
+function runClaudeCode(promptText, model, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const args = [
+      "-p", promptText,
+      "--bare",
+      "--model", model || DEFAULT_CLAUDE_CODE_MODEL,
+      "--no-session-persistence",
+      "--tools", "",
+    ];
+    const child = execFile("claude", args, {
+      timeout: timeoutMs,
+      maxBuffer: 1024 * 64,
+      env: { ...process.env, CLAUDE_CODE_SIMPLE: "1" },
+    }, (error, stdout, stderr) => {
+      if (error) {
+        reject(error);
+      } else {
+        resolve(stdout);
+      }
+    });
+  });
+}
 
+async function generatePersonaDialogueViaClaude(input, config) {
+  const prompt = `${PERSONA_DIALOGUE_SYSTEM_PROMPT}\n\n${buildPersonaDialoguePrompt(input)}`;
+
+  try {
+    const rawText = await runClaudeCode(prompt, config.model, config.timeoutMs);
+    const text = sanitizePersonaDialogueText(rawText, input.fallbackText || "");
+    if (!text) {
+      return { ok: false, text: "", reason: "empty" };
+    }
+    return { ok: true, text, provider: "claude-code", model: config.model };
+  } catch (error) {
+    return {
+      ok: false,
+      text: "",
+      reason: error?.killed ? "timeout" : "exec",
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+async function generatePersonaDialogueViaApi(input, config) {
   const prompt = buildPersonaDialoguePrompt(input);
   const apiUrl = resolvePersonaApiUrl(config.apiUrl);
   const controller = new AbortController();
@@ -178,12 +219,7 @@ async function generatePersonaDialogue(input = {}, settings = {}, env = process.
       return { ok: false, text: "", reason: "empty" };
     }
 
-    return {
-      ok: true,
-      text,
-      provider: "openai-compatible",
-      model: config.model,
-    };
+    return { ok: true, text, provider: "openai-compatible", model: config.model };
   } catch (error) {
     return {
       ok: false,
@@ -194,6 +230,18 @@ async function generatePersonaDialogue(input = {}, settings = {}, env = process.
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function generatePersonaDialogue(input = {}, settings = {}, env = process.env) {
+  const config = resolvePersonaDialogueConfig(settings, env);
+  if (!config.enabled) {
+    return { ok: false, text: "", reason: "disabled" };
+  }
+
+  if (config.provider === "claude-code") {
+    return generatePersonaDialogueViaClaude(input, config);
+  }
+  return generatePersonaDialogueViaApi(input, config);
 }
 
 function createDefaultState() {
@@ -596,6 +644,7 @@ class DesktopApp {
       ...current,
       personaDialogue: {
         enabled: current.personaDialogue.enabled,
+        provider: current.personaDialogue.provider,
         model: current.personaDialogue.model,
         apiUrl: current.personaDialogue.apiUrl,
         timeoutMs: current.personaDialogue.timeoutMs,
@@ -672,6 +721,7 @@ class DesktopApp {
     const presetScales = [50, 60, 70, 80, 100, 120];
     const behaviorOptions = getAvatarBehaviorPreviewOptions(currentModel);
     const personaConfig = resolvePersonaDialogueConfig(state.personaDialogue);
+    const personaProvider = personaConfig.provider || "openai-compatible";
     const personaApiUrl = state.personaDialogue.apiUrl || DEFAULT_PERSONA_API_URL;
     const keyConfigured = personaConfig.configured;
     const runtimeStatus = this.runtime.getStatus();
@@ -803,13 +853,33 @@ class DesktopApp {
           },
           { type: "separator" },
           {
-            label: `模型: ${personaConfig.model || DEFAULT_PERSONA_MODEL} (配置文件)`,
-            enabled: false,
+            label: "模型源",
+            submenu: PERSONA_PROVIDERS.map((p) => ({
+              label: p === "claude-code" ? "Claude Code (本地)" : "OpenAI 兼容 API",
+              type: "radio",
+              checked: personaProvider === p,
+              click: () =>
+                this.updateState({
+                  personaDialogue: {
+                    ...state.personaDialogue,
+                    provider: p,
+                    model: p === "claude-code" ? DEFAULT_CLAUDE_CODE_MODEL : DEFAULT_PERSONA_MODEL,
+                  },
+                }),
+            })),
           },
           {
-            label: `API URL: ${personaApiUrl.replace(/^https?:\/\//, "")}`,
+            label: `模型: ${personaConfig.model} (配置文件)`,
             enabled: false,
           },
+          ...(personaProvider === "openai-compatible"
+            ? [
+                {
+                  label: `API URL: ${personaApiUrl.replace(/^https?:\/\//, "")}`,
+                  enabled: false,
+                },
+              ]
+            : []),
           {
             label: "重新加载配置文件",
             click: () => {

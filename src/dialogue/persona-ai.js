@@ -2,6 +2,8 @@ export const DEFAULT_PERSONA_MODEL = process.env.DEVFLOW_DIALOGUE_MODEL?.trim() 
 export const DEFAULT_PERSONA_API_URL =
   process.env.DEVFLOW_DIALOGUE_API_URL?.trim() || "https://api.openai.com/v1/chat/completions";
 export const DEFAULT_PERSONA_TIMEOUT_MS = 8_000;
+export const DEFAULT_CLAUDE_CODE_MODEL = "haiku";
+export const PERSONA_PROVIDERS = ["openai-compatible", "claude-code"];
 
 function firstLine(text) {
   return String(text || "")
@@ -41,10 +43,16 @@ function normalizeApiUrl(value, fallback = DEFAULT_PERSONA_API_URL) {
   return trimmed || fallback;
 }
 
+function normalizeProvider(value) {
+  const trimmed = String(value || "").trim().toLowerCase();
+  return PERSONA_PROVIDERS.includes(trimmed) ? trimmed : "openai-compatible";
+}
+
 export function createDefaultPersonaDialogueSettings(env = process.env) {
   const envConfig = getPersonaDialogueConfig(env);
   return {
     enabled: envConfig.enabled,
+    provider: "openai-compatible",
     apiKey: "",
     model: envConfig.model,
     apiUrl: envConfig.apiUrl,
@@ -56,6 +64,7 @@ export function normalizePersonaDialogueSettings(input = {}, fallback = createDe
   const next = input && typeof input === "object" ? input : {};
   return {
     enabled: typeof next.enabled === "boolean" ? next.enabled : fallback.enabled,
+    provider: normalizeProvider(next.provider || fallback.provider),
     apiKey: typeof next.apiKey === "string" ? next.apiKey.trim() : fallback.apiKey,
     model: typeof next.model === "string" && next.model.trim() ? next.model.trim() : fallback.model,
     apiUrl: normalizeApiUrl(next.apiUrl, fallback.apiUrl),
@@ -72,15 +81,19 @@ export function resolvePersonaDialogueConfig(settings = {}, env = process.env) {
     settings,
     createDefaultPersonaDialogueSettings(env),
   );
+  const provider = normalized.provider;
   const apiKey = normalized.apiKey || envConfig.apiKey;
+  const isClaudeCode = provider === "claude-code";
+  const configured = isClaudeCode || Boolean(apiKey);
 
   return {
-    enabled: Boolean(normalized.enabled && apiKey),
+    enabled: Boolean(normalized.enabled && configured),
+    provider,
     apiKey,
     apiUrl: normalizeApiUrl(normalized.apiUrl, envConfig.apiUrl),
-    model: normalized.model || envConfig.model,
+    model: isClaudeCode ? (normalized.model || DEFAULT_CLAUDE_CODE_MODEL) : (normalized.model || envConfig.model),
     timeoutMs: normalized.timeoutMs || envConfig.timeoutMs,
-    configured: Boolean(apiKey),
+    configured,
   };
 }
 
@@ -92,14 +105,14 @@ export function buildPersonaDialoguePrompt(input = {}) {
   const message = truncate(input.message || "", 120);
 
   const hints = {
-    idle: "当前没有新事件，像在工位边轻声自言自语。",
-    request: "刚收到新请求，像接住一件新事情时的短句反应。",
-    success: "刚完成一步，像轻松确认进展的短句。",
-    error: "刚遇到异常或失败，像稳住节奏时的短句。",
-    disconnect: "连接刚断开，像盯着链路时的短句。",
-    reconnect: "连接刚恢复，像重新接上节奏时的短句。",
-    thinking: "像短暂思考时的喃喃自语。",
-    working: "像继续盯着手头工作的短句。",
+    idle: "当前没有新事件，像无聊到快融化、东张西望找乐子的样子。",
+    request: "刚收到新请求，像被突然叫去干活、痛苦但又不得不爬起来的反应。",
+    success: "刚完成一步，像得意洋洋想邀功的小表情。",
+    error: "刚遇到异常或失败，像踩到坑之后委屈巴巴但又不服气。",
+    disconnect: "连接刚断开，像突然掉线、慌张又搞笑的反应。",
+    reconnect: "连接刚恢复，像失而复得、大喜过望的样子。",
+    thinking: "像歪头思考时冒出的奇怪脑洞。",
+    working: "像埋头干活时忍不住碎碎念吐槽的样子。",
   };
 
   const contextLines = [
@@ -114,10 +127,10 @@ export function buildPersonaDialoguePrompt(input = {}) {
     "请为一个桌面 Live2D 桌宠生成一句中文闲聊台词。",
     "要求:",
     "1. 只输出一句中文，不要解释，不要引号，不要 markdown。",
-    "2. 长度控制在 10 到 28 个汉字，尽量自然，像 backstage 员工口吻，但不要提“办公室世界观”设定。",
-    "3. 语气要像一个冷静、靠谱、轻微吐槽感的同伴，不要太夸张，不要卖萌。",
+    "2. 长度控制在 10 到 28 个汉字，尽量自然口语化。",
+    "3. 语气要像一个古灵精怪、爱搞怪、偶尔犯傻但很可爱的小伙伴，可以用夸张的语气、颜文字风格的表达、无厘头的吐槽，但不要太油腻。",
     "4. 只能说主观短句，不能编造工具结果、文件路径或未提供的事实。",
-    "5. 如果上下文信息很少，也只输出一句泛化但自然的话。",
+    "5. 如果上下文信息很少，也只输出一句搞怪但自然的话。",
     hints[category] ? `场景提示: ${hints[category]}` : "",
     contextLines.length > 0 ? `上下文:\n${contextLines.join("\n")}` : "",
   ]
