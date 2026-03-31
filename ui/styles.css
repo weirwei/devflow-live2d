@@ -309,6 +309,27 @@ input[type="range"]::-webkit-slider-thumb {
   transition: transform 120ms linear;
 }
 
+.avatar-shell__runtime,
+.avatar-shell__runtime canvas,
+.avatar-shell__preview {
+  width: 100%;
+  height: 100%;
+}
+
+.avatar-shell__runtime {
+  position: relative;
+  overflow: visible;
+  pointer-events: auto;
+}
+
+.avatar-shell__runtime canvas,
+.avatar-shell__preview {
+  position: absolute;
+  inset: 0;
+  display: block;
+  background: transparent;
+}
+
 .shell--panel-hidden .avatar-shell {
   width: min(100%, 420px);
   max-height: 100%;

@@ -25,6 +25,7 @@ import {
   resolveWindowBounds,
   sameWindowBounds,
 } from "./src/app/window-bounds.js";
+import { DesktopServiceRuntime } from "./src/app/service-runtime.js";
 import {
   DEFAULT_PERSONA_API_URL,
   DEFAULT_PERSONA_MODEL,
@@ -580,6 +581,12 @@ class DesktopApp {
       },
     });
     this.tray = new TrayController(() => this.buildTrayMenu());
+    this.runtime = new DesktopServiceRuntime({
+      app,
+      rootDir: __dirname,
+      protocolBaseUrl: DEFAULT_PROTOCOL_BASE_URL,
+    });
+    this.menuActionInFlight = false;
   }
 
   getPublicState() {
@@ -640,6 +647,23 @@ class DesktopApp {
     this.overlay.broadcast(IPC_CHANNELS.STATE_BROADCAST, this.getPublicState());
   }
 
+  withMenuAction(label, action) {
+    return async () => {
+      if (this.menuActionInFlight) return;
+      this.menuActionInFlight = true;
+
+      try {
+        await action();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`[devflow-live2d] ${label} failed:`, message);
+      } finally {
+        this.menuActionInFlight = false;
+        this.broadcastState();
+      }
+    };
+  }
+
   buildTrayMenu() {
     const state = this.store.get();
     const currentScale = state.avatarTuning.scale;
@@ -650,6 +674,7 @@ class DesktopApp {
     const personaConfig = resolvePersonaDialogueConfig(state.personaDialogue);
     const personaApiUrl = state.personaDialogue.apiUrl || DEFAULT_PERSONA_API_URL;
     const keyConfigured = personaConfig.configured;
+    const runtimeStatus = this.runtime.getStatus();
 
     return Menu.buildFromTemplate([
       {
@@ -834,6 +859,78 @@ class DesktopApp {
       },
       { type: "separator" },
       {
+        label: "后台服务",
+        submenu: [
+          {
+            label: "devflow-protocol",
+            submenu: [
+              {
+                label: runtimeStatus.protocol.running
+                  ? `devflow-protocol 运行中（PID: ${runtimeStatus.protocol.pid}）`
+                  : "devflow-protocol 未运行",
+                enabled: false,
+              },
+              {
+                label: runtimeStatus.protocol.running ? "停止 devflow-protocol" : "启动 devflow-protocol",
+                enabled: runtimeStatus.capabilities.bun,
+                click: this.withMenuAction("toggle protocol", async () => {
+                  if (this.runtime.getStatus().protocol.running) {
+                    await this.runtime.stopProtocol();
+                  } else {
+                    await this.runtime.startProtocol();
+                  }
+                }),
+              },
+            ],
+          },
+          {
+            label: "Claude 全局插件",
+            submenu: [
+              {
+                label: runtimeStatus.claudePlugin.installed
+                  ? "Claude 全局插件 已安装"
+                  : "Claude 全局插件 未安装",
+                enabled: false,
+              },
+              {
+                label: runtimeStatus.claudePlugin.installed ? "卸载 Claude 全局插件" : "安装 Claude 全局插件",
+                enabled:
+                  runtimeStatus.capabilities.bun && runtimeStatus.capabilities.jq && runtimeStatus.capabilities.bash,
+                click: this.withMenuAction("toggle Claude plugin", async () => {
+                  if (this.runtime.getStatus().claudePlugin.installed) {
+                    await this.runtime.uninstallClaudeGlobalPlugin();
+                  } else {
+                    await this.runtime.installClaudeGlobalPlugin();
+                  }
+                }),
+              },
+            ],
+          },
+          { type: "separator" },
+          {
+            label: runtimeStatus.protocol.logPath,
+            enabled: false,
+          },
+          {
+            label: "打开日志目录",
+            click: () => {
+              fs.mkdirSync(this.runtime.getLogDir(), { recursive: true });
+              void shell.openPath(this.runtime.getLogDir());
+            },
+          },
+          ...(runtimeStatus.protocol.lastError
+            ? [
+                { type: "separator" },
+                {
+                  label: `最近错误: ${runtimeStatus.protocol.lastError}`.slice(0, 140),
+                  enabled: false,
+                },
+              ]
+            : []),
+        ],
+      },
+      { type: "separator" },
+      {
         label: "退出",
         accelerator: "CommandOrControl+Q",
         click: () => app.quit(),
@@ -882,6 +979,10 @@ class DesktopApp {
     this.broadcastState();
     this.registerIpc();
     this.registerShortcuts();
+    void this.runtime.startProtocol().catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("[devflow-live2d] failed to start devflow-protocol:", message);
+    });
   }
 }
 
@@ -912,4 +1013,5 @@ app.on("window-all-closed", () => {
 
 app.on("will-quit", () => {
   globalShortcut.unregisterAll();
+  void desktopApp.runtime.shutdown();
 });

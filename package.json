@@ -1,17 +1,63 @@
 {
   "name": "devflow-live2d",
   "version": "0.1.0",
+  "description": "macOS Live2D desktop overlay for devflow",
+  "author": "weirwei",
   "private": true,
   "type": "module",
   "main": "main.js",
   "scripts": {
     "dev": "electron .",
     "start": "electron .",
+    "prepare:bundle": "node scripts/prepare-bundle-resources.mjs",
+    "dist:mac": "npm run prepare:bundle && electron-builder --mac",
     "doctor": "node scripts/check-live2d-assets.mjs",
     "import:official-sdk": "node scripts/import-official-sdk.mjs",
-    "test": "node --check main.js && node --check preload.js && node --check ui/app.js && bun test"
+    "test": "node --check main.js && node --check preload.js && node --check ui/app.js && node --check src/app/service-runtime.js && bun test"
   },
   "devDependencies": {
-    "electron": "^41.0.0"
+    "electron": "^41.0.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.devflow.live2d",
+    "productName": "Devflow Live2D",
+    "electronDist": "/Users/weirwei/Downloads",
+    "directories": {
+      "buildResources": "build-resources",
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "package.json",
+      "ui/**/*",
+      "src/**/*",
+      "assets/**/*",
+      "official-demo-runtime/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "build-resources/bundle",
+        "to": "bundle",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "build-resources/runtime-tools",
+        "to": "runtime-tools",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    }
   }
 }

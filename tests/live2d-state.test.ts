@@ -22,7 +22,7 @@ describe("normalizeProtocolEvent", () => {
   it("normalizes protocol task events into desktop-friendly shape", () => {
     const normalized = normalizeProtocolEvent({
       eventType: "task.updated",
-      source: "codex-bridge",
+      source: "protocol",
       timestamp: "2026-03-24T21:00:00.000Z",
       task: {
         id: "task-1",
@@ -42,7 +42,7 @@ describe("normalizeProtocolEvent", () => {
   it("extracts project from protocol payload", () => {
     const normalized = normalizeProtocolEvent({
       eventType: "task.updated",
-      source: "codex-bridge",
+      source: "protocol",
       payload: {
         project: "backstage/devflow-live2d",
       },
@@ -57,7 +57,7 @@ describe("avatar state projection", () => {
     const initial = createInitialAvatarState();
     const normalized = normalizeProtocolEvent({
       eventType: "task.updated",
-      source: "codex-bridge",
+      source: "protocol",
       timestamp: "2026-03-24T21:00:00.000Z",
       task: {
         id: "task-1",
@@ -75,7 +75,7 @@ describe("avatar state projection", () => {
   it("emits a success-toned bubble for tool completion", () => {
     const normalized = normalizeProtocolEvent({
       eventType: "tool.completed",
-      source: "codex-bridge",
+      source: "protocol",
       timestamp: "2026-03-24T21:00:00.000Z",
       payload: {
         message: "Tool finished successfully.",

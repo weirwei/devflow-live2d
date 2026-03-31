@@ -1,26 +1,28 @@
-# Task Plan: Add Persona Small Talk To Live2D Desktop
+# Task Plan: Bundle Live2D Desktop As A macOS App
 
 ## Goal
-Add a local single-persona small-talk layer to `devflow-live2d` so the desktop avatar can produce backstage-style banter and short reactions without changing `devflow-protocol`.
+Package `devflow-live2d` as a macOS app that bundles `devflow-protocol`, starts it automatically, and exposes menu controls for Codex bridge plus Claude global plugin install/uninstall.
 
 ## Phases
-- [x] Phase 1: Plan and setup
-- [x] Phase 2: Inspect renderer, queue, and backstage reference dialogue logic
-- [x] Phase 3: Implement persona dialogue modules and queue read helpers
-- [x] Phase 4: Wire persona dialogue into the renderer event flow
-- [x] Phase 5: Verify with tests and syntax checks
+- [x] Phase 1: Inspect current desktop app, sibling projects, and existing install scripts
+- [x] Phase 2: Design bundled runtime layout and process lifecycle
+- [x] Phase 3: Implement main-process service manager and tray menu actions
+- [x] Phase 4: Add packaging scripts/config to include protocol and plugin resources
+- [ ] Phase 5: Verify startup flow, syntax, and packaging assumptions
 
 ## Key Questions
-1. How should local persona chat avoid interrupting real assistant dialogue bubbles?
-2. Which idle/event triggers belong in the desktop client instead of protocol or pixel-office?
-3. How much avatar mood linkage is enough without creating a second state machine?
+1. How should the packaged app locate bundled `devflow-protocol`, bridge scripts, and installer assets in dev vs packaged mode?
+2. Which dependencies can be assumed on the host machine for the first version: `bun`, `python3`, `jq`, and Claude CLI/plugin directories?
+3. How should menu state reflect running/stopped child processes and install status without adding a heavy UI?
 
 ## Decisions Made
-- Keep persona chat fully local to the renderer and do not emit fake protocol events.
-- Use a single avatar persona inspired by backstage staff tone instead of multi-employee casting.
-- Reuse `assistantQueue` for persona dialogue pages and block persona chatter while real assistant dialogue is active.
+- Reuse sibling repositories and existing install/uninstall scripts instead of inventing a second plugin installer.
+- Start `devflow-protocol` automatically with the desktop app; make Codex bridge explicitly toggleable from the tray menu.
+- Treat bundled app resources as read-only assets under Electron `process.resourcesPath`, while persistent data remains under the user home directory.
+- Avoid calling the packaged `devflow-protocol/install.sh` directly because it writes state into its own script directory; instead the desktop app now performs plugin deployment and settings mutation itself.
+- Replace the Python Codex bridge runtime with a Bun-based local bridge so the packaged app only needs bundled `bun` and `jq`.
 
 ## Errors Encountered
 
 ## Status
-**Completed** - Persona chat is implemented locally in the renderer and verified with passing tests.
+**Phase 5** - Running validation for syntax, resource bundling, and packaging assumptions.

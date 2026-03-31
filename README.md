@@ -30,6 +30,35 @@ This project now includes:
 
 This app is explicitly macOS-first.
 
+## Bundled macOS App
+
+The desktop app can now be packaged as a macOS app and includes a bundled copy of the sibling `devflow-protocol` project under the app resources.
+
+### Behavior
+
+- app launch starts `devflow-protocol` automatically
+- tray menu can start and stop the Codex bridge
+- tray menu can install and uninstall the Claude global `devflow-protocol` plugin
+
+### Packaging
+
+```bash
+npm install
+npm run dist:mac
+```
+
+The build step copies `../devflow-protocol` into `build-resources/bundle/devflow-protocol` before packaging.
+
+### Host Requirements
+
+The packaged app bundles project resources, but the current runtime still expects these tools to exist on the host machine:
+
+- bundled `bun` for `devflow-protocol`, the Codex bridge, and the plugin MCP server
+- bundled `jq` for Claude plugin hook scripts
+- system `bash` only for invoking hook shell scripts
+
+The build step currently copies `bun` from `/Users/weirwei/.bun/bin/bun` and `jq` from `/usr/bin/jq`. You can override those source paths with `BUN_PATH` and `JQ_PATH` before running `npm run dist:mac`.
+
 ## Persona Dialogue Config
 
 AI persona dialogue can be configured in:

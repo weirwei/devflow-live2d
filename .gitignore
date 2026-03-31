@@ -8,3 +8,5 @@ pnpm-debug.log*
 agent.md
 claude.md
 .spec-workflow
+build-resources/
+dist/

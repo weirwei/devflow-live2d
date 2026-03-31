@@ -40,6 +40,12 @@ const appState = {
     id: "mock",
     selectedModelId: "",
     selectedModelName: "Unknown",
+    layoutBase: {
+      runtimeWidth: 1.1,
+      centerX: 0.45,
+      centerY: 0.12,
+      scale: 1,
+    },
   },
   avatarTuning: {
     scale: 100,
@@ -91,12 +97,31 @@ let bubbleLayoutFrame = 0;
 
 function applyAvatarTransformVariables() {
   const root = document.documentElement;
+  const usingLive2D = appState.runtime.id !== "mock";
+  const visualScale = usingLive2D ? 1 : appState.avatarTuning.scale / 100;
 
-  root.style.setProperty("--avatar-scale", String(appState.avatarTuning.scale / 100));
+  root.style.setProperty("--avatar-scale", String(visualScale));
   root.style.setProperty("--avatar-offset-x", `${appState.avatarTuning.offsetX}px`);
   root.style.setProperty("--avatar-offset-y", `${appState.avatarTuning.offsetY}px`);
   root.style.setProperty("--avatar-tilt-x", `${appState.interaction.tiltX}deg`);
   root.style.setProperty("--avatar-tilt-y", `${appState.interaction.tiltY}deg`);
+}
+
+function applyLive2DLayoutTuning() {
+  if (appState.runtime.id === "mock") return;
+
+  const baseLayout = appState.runtime.layoutBase || {};
+  const baseRuntimeWidth = Number(baseLayout.runtimeWidth) || 1.1;
+  const manifestScale = Number(baseLayout.scale) || 1;
+  const tuningScale = (Number(appState.avatarTuning.scale) || 100) / 100;
+  const nextLayout = {
+    runtimeWidth: baseRuntimeWidth * manifestScale * tuningScale,
+    centerX: Number(baseLayout.centerX) || 0.45,
+    centerY: Number(baseLayout.centerY) || 0.12,
+  };
+
+  window.DevflowLive2DModelLayout = nextLayout;
+  window.BackstageLive2DModelLayout = nextLayout;
 }
 
 function updateBubbleLayout() {
@@ -164,6 +189,7 @@ function renderBubble() {
 function renderAll() {
   elements.shell.classList.add("shell--panel-hidden");
   applyAvatarTransformVariables();
+  applyLive2DLayoutTuning();
   renderRuntimeMode();
   renderBubble();
   scheduleBubbleLayout();
@@ -418,6 +444,12 @@ async function initializeRuntime() {
     id: config.runtimeId,
     selectedModelId: config.selectedModel.id,
     selectedModelName: config.selectedModel.name,
+    layoutBase: {
+      runtimeWidth: config.manifest?.model?.runtimeWidth ?? 1.1,
+      centerX: config.manifest?.model?.centerX ?? 0.45,
+      centerY: config.manifest?.model?.centerY ?? 0.12,
+      scale: config.manifest?.model?.scale ?? 1,
+    },
   };
 
   if (config.ok && config.adapterScript) {
