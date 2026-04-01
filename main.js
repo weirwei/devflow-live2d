@@ -6,6 +6,7 @@ import {
   globalShortcut,
   ipcMain,
   nativeImage,
+  powerMonitor,
   screen,
   shell,
 } from "electron";
@@ -21,6 +22,7 @@ import {
 import { IPC_CHANNELS } from "./src/ipc-channels.js";
 import {
   createCenteredWindowBounds,
+  isWindowBoundsVisible,
   normalizeWindowBounds,
   resolveWindowBounds,
   sameWindowBounds,
@@ -388,6 +390,43 @@ class OverlayWindowController {
     this.onWindowBoundsChange = onWindowBoundsChange;
     this.window = null;
     this.lastBounds = null;
+    this.screenLocked = false;
+    this.displayChangeTimer = null;
+
+    powerMonitor.on("lock-screen", () => {
+      this.screenLocked = true;
+    });
+    powerMonitor.on("unlock-screen", () => {
+      this.screenLocked = false;
+    });
+
+    // When a display is added or metrics change (e.g. after unlock with
+    // external monitors reconnecting), re-check whether the saved bounds
+    // are now visible and restore them so the window returns to the
+    // correct monitor instead of staying stuck on the primary display.
+    const scheduleDisplayRecheck = () => {
+      if (this.displayChangeTimer) clearTimeout(this.displayChangeTimer);
+      this.displayChangeTimer = setTimeout(() => {
+        this.displayChangeTimer = null;
+        this.restoreBoundsIfNeeded();
+      }, 1500);
+    };
+    screen.on("display-added", scheduleDisplayRecheck);
+    screen.on("display-metrics-changed", scheduleDisplayRecheck);
+  }
+
+  restoreBoundsIfNeeded() {
+    if (!this.window || this.screenLocked) return;
+    const savedBounds = this.getWindowBounds?.();
+    if (!savedBounds) return;
+    const workAreas = screen.getAllDisplays().map((d) => d.workArea);
+    if (isWindowBoundsVisible(savedBounds, workAreas)) {
+      const normalized = normalizeWindowBounds(savedBounds, this.lastBounds);
+      if (!sameWindowBounds(normalized, this.lastBounds)) {
+        this.lastBounds = normalized;
+        this.window.setBounds(normalized, false);
+      }
+    }
   }
 
   create() {
@@ -480,13 +519,18 @@ class OverlayWindowController {
   applyMode(state) {
     if (!this.window) return;
 
-    const resolvedBounds = resolveWindowBounds(state.windowBounds, {
-      primaryWorkArea: screen.getPrimaryDisplay()?.workArea,
-      workAreas: screen.getAllDisplays().map((display) => display.workArea),
-    });
-    if (!sameWindowBounds(resolvedBounds, this.lastBounds)) {
-      this.lastBounds = resolvedBounds;
-      this.window.setBounds(resolvedBounds, false);
+    // When the screen is locked, macOS may report only the primary display.
+    // Skip bounds resolution to avoid snapping the window away from an
+    // external monitor that will reappear after unlock.
+    if (!this.screenLocked) {
+      const resolvedBounds = resolveWindowBounds(state.windowBounds, {
+        primaryWorkArea: screen.getPrimaryDisplay()?.workArea,
+        workAreas: screen.getAllDisplays().map((display) => display.workArea),
+      });
+      if (!sameWindowBounds(resolvedBounds, this.lastBounds)) {
+        this.lastBounds = resolvedBounds;
+        this.window.setBounds(resolvedBounds, false);
+      }
     }
 
     if (state.alwaysOnTop) {
