@@ -392,27 +392,7 @@ class OverlayWindowController {
     this.lastBounds = null;
     this.screenLocked = false;
     this.displayChangeTimer = null;
-
-    powerMonitor.on("lock-screen", () => {
-      this.screenLocked = true;
-    });
-    powerMonitor.on("unlock-screen", () => {
-      this.screenLocked = false;
-    });
-
-    // When a display is added or metrics change (e.g. after unlock with
-    // external monitors reconnecting), re-check whether the saved bounds
-    // are now visible and restore them so the window returns to the
-    // correct monitor instead of staying stuck on the primary display.
-    const scheduleDisplayRecheck = () => {
-      if (this.displayChangeTimer) clearTimeout(this.displayChangeTimer);
-      this.displayChangeTimer = setTimeout(() => {
-        this.displayChangeTimer = null;
-        this.restoreBoundsIfNeeded();
-      }, 1500);
-    };
-    screen.on("display-added", scheduleDisplayRecheck);
-    screen.on("display-metrics-changed", scheduleDisplayRecheck);
+    this.displayListenersRegistered = false;
   }
 
   restoreBoundsIfNeeded() {
@@ -430,6 +410,25 @@ class OverlayWindowController {
   }
 
   create() {
+    if (!this.displayListenersRegistered) {
+      this.displayListenersRegistered = true;
+      powerMonitor.on("lock-screen", () => {
+        this.screenLocked = true;
+      });
+      powerMonitor.on("unlock-screen", () => {
+        this.screenLocked = false;
+      });
+      const scheduleDisplayRecheck = () => {
+        if (this.displayChangeTimer) clearTimeout(this.displayChangeTimer);
+        this.displayChangeTimer = setTimeout(() => {
+          this.displayChangeTimer = null;
+          this.restoreBoundsIfNeeded();
+        }, 1500);
+      };
+      screen.on("display-added", scheduleDisplayRecheck);
+      screen.on("display-metrics-changed", scheduleDisplayRecheck);
+    }
+
     const displays = screen.getAllDisplays();
     const primaryDisplay = screen.getPrimaryDisplay();
     const workAreas = displays.map((display) => display.workArea);
