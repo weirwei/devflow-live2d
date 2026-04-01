@@ -379,6 +379,7 @@ class OverlayWindowController {
     onFocusChange,
     onCloseRequest,
     onHideRequested,
+    onReadyToShow,
     getWindowBounds,
     onWindowBoundsChange,
   }) {
@@ -386,6 +387,7 @@ class OverlayWindowController {
     this.onFocusChange = onFocusChange;
     this.onCloseRequest = onCloseRequest;
     this.onHideRequested = onHideRequested;
+    this.onReadyToShow = onReadyToShow;
     this.getWindowBounds = getWindowBounds;
     this.onWindowBoundsChange = onWindowBoundsChange;
     this.window = null;
@@ -454,6 +456,7 @@ class OverlayWindowController {
       roundedCorners: false,
       title: "Devflow Live2D Desktop",
       backgroundColor: "#00000000",
+      show: false,
       skipTaskbar: true,
       webPreferences: {
         preload: path.join(this.rootDir, "preload.js"),
@@ -461,6 +464,10 @@ class OverlayWindowController {
         nodeIntegration: false,
         sandbox: false,
       },
+    });
+
+    this.window.once("ready-to-show", () => {
+      this.onReadyToShow?.();
     });
 
     this.window.loadFile(path.join(this.rootDir, "ui/index.html"));
@@ -617,6 +624,7 @@ class DesktopApp {
       },
       onCloseRequest: () => this.isQuitting,
       onHideRequested: () => this.hideOverlay(),
+      onReadyToShow: () => this.overlay.applyMode(this.store.get()),
       getWindowBounds: () => this.store.get().windowBounds,
       onWindowBoundsChange: (windowBounds) => {
         this.updateState({ windowBounds }, { broadcast: false });
@@ -1024,7 +1032,6 @@ class DesktopApp {
   initialize() {
     this.loadSettings();
     this.overlay.ensure();
-    this.overlay.applyMode(this.store.get());
     this.tray.ensure();
     this.persistSettings();
     this.broadcastState();
