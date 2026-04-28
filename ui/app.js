@@ -12,6 +12,7 @@ import {
   PersonaChatController,
   PERSONA_POLL_INTERVAL_MS,
   buildPersonaRequestContext,
+  RecentEventTracker,
 } from "../src/dialogue/persona-chat.js";
 import { deriveStatusBubble } from "../src/status-bubble.js";
 import { getLive2DModelById } from "../src/live2d-model-catalog.js";
@@ -82,6 +83,7 @@ const assistantQueue = new DialogueQueue({
   defaultDurationMs: 5200,
 });
 const personaController = new PersonaChatController();
+const recentEvents = new RecentEventTracker();
 
 const elements = {
   shell: document.querySelector("#shell"),
@@ -274,15 +276,16 @@ function enqueuePersonaBubble(personaItem) {
     return false;
   }
 
-  const pages = splitAssistantMessage(personaItem.text);
+  const lines = Array.isArray(personaItem.lines) && personaItem.lines.length > 0
+    ? personaItem.lines
+    : splitAssistantMessage(personaItem.text);
   const applied = applyPersonaMoodHint(personaItem);
 
-  for (const page of pages) {
-    assistantQueue.enqueue({
-      text: page,
-      tone: "neutral",
-      channel: "persona",
-    });
+  for (const line of lines) {
+    assistantQueue.enqueue(
+      { text: line, tone: "neutral", channel: "persona" },
+      { durationMs: 3200 },
+    );
   }
 
   if (applied) {
@@ -304,12 +307,21 @@ async function maybeGeneratePersonaLine(personaItem, normalizedEvent = null) {
 
   personaGenerationInFlight = true;
   try {
-    const response = await generator(buildPersonaRequestContext(personaItem, normalizedEvent));
-    if (response?.ok && typeof response.text === "string" && response.text.trim()) {
-      return {
-        ...personaItem,
-        text: response.text.trim(),
-      };
+    const context = buildPersonaRequestContext(
+      personaItem,
+      normalizedEvent,
+      recentEvents.summarize(),
+    );
+    const response = await generator(context);
+    if (response?.ok) {
+      const lines = Array.isArray(response.lines) && response.lines.length > 0
+        ? response.lines
+        : typeof response.text === "string" && response.text.trim()
+          ? [response.text.trim()]
+          : null;
+      if (lines) {
+        return { ...personaItem, text: lines[0], lines };
+      }
     }
   } catch (error) {
     console.warn("Persona dialogue generation failed, using fallback line.", error);
@@ -334,6 +346,7 @@ function maybeQueuePersonaFromEvent(normalized) {
 }
 
 function pushBubble(normalized) {
+  recentEvents.push(normalized);
   const statusItem = deriveStatusBubble(normalized);
   if (statusItem) {
     dialogueQueue.enqueue(statusItem);

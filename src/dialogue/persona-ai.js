@@ -95,12 +95,25 @@ export function resolvePersonaDialogueConfig(settings = {}, env = process.env) {
   };
 }
 
+const RANDOM_MOODS = [
+  "犯困打哈欠", "嘴馋想吃零食", "突然亢奋", "摸鱼心虚",
+  "无聊到发呆", "莫名其妙开心", "有点小傲娇", "假装很忙",
+  "想去摸猫", "偷偷划水", "困到灵魂出窍", "突然中二病发作",
+  "想喝奶茶", "假装自己是大佬", "社恐发作", "突然想整活",
+];
+
+export function pickRandomMood(rng = Math.random) {
+  return RANDOM_MOODS[Math.floor(rng() * RANDOM_MOODS.length)];
+}
+
 export function buildPersonaDialoguePrompt(input = {}) {
   const category = firstLine(input.category || "idle");
   const project = truncate(input.project || "", 80);
   const task = truncate(input.task || "", 100);
   const rawType = firstLine(input.rawType || input.eventType || "");
   const message = truncate(input.message || "", 120);
+  const recentContext = truncate(input.recentContext || "", 200);
+  const mood = firstLine(input.mood || pickRandomMood());
 
   const hints = {
     idle: "当前没有新事件，像无聊到快融化、东张西望找乐子的样子。",
@@ -115,25 +128,62 @@ export function buildPersonaDialoguePrompt(input = {}) {
 
   const contextLines = [
     category ? `场景: ${category}` : "",
+    `当前情绪: ${mood}`,
     rawType ? `事件类型: ${rawType}` : "",
     project ? `项目: ${project}` : "",
     task ? `任务: ${task}` : "",
     message ? `事实描述: ${message}` : "",
+    recentContext ? `近况: ${recentContext}` : "",
   ].filter(Boolean);
 
   return [
-    "请为一个桌面 Live2D 桌宠生成一句中文闲聊台词。",
+    "请为一个桌面 Live2D 桌宠生成 2~3 句中文闲聊台词（同一个角色的连续碎碎念）。",
     "要求:",
-    "1. 只输出一句中文，不要解释，不要引号，不要 markdown。",
-    "2. 长度控制在 10 到 28 个汉字，尽量自然口语化。",
-    "3. 语气要像一个古灵精怪、爱搞怪、偶尔犯傻但很可爱的小伙伴，可以用夸张的语气、颜文字风格的表达、无厘头的吐槽，但不要太油腻。",
-    "4. 只能说主观短句，不能编造工具结果、文件路径或未提供的事实。",
-    "5. 如果上下文信息很少，也只输出一句搞怪但自然的话。",
+    "1. 输出纯 JSON，格式: {\"lines\":[\"第一句\",\"第二句\"]}，不要解释、引号包裹或 markdown。",
+    "2. 每句 8~22 个汉字，口语化、节奏轻快。",
+    "3. 性格: 古灵精怪、爱搞怪、偶尔犯傻但很可爱的小伙伴。会用夸张语气、无厘头吐槽、偶尔蹦开发梗或加班梗，但不油腻。",
+    "4. 2~3 句之间要有递进或转折，像自言自语的碎碎念，不是重复说同一件事。",
+    "5. 只能说主观短句，不能编造工具结果、文件路径或未提供的事实。",
+    "6. 根据当前情绪调整语气和内容，让每次对话风格不同。",
     hints[category] ? `场景提示: ${hints[category]}` : "",
     contextLines.length > 0 ? `上下文:\n${contextLines.join("\n")}` : "",
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+export function parsePersonaDialogueLines(raw, fallback = "") {
+  const text = String(raw || "").trim();
+  if (!text) return fallback ? [fallback] : [];
+
+  // Try JSON parse
+  try {
+    const json = JSON.parse(text);
+    if (Array.isArray(json?.lines)) {
+      const lines = json.lines
+        .map((l) => sanitizePersonaDialogueText(String(l || "")))
+        .filter(Boolean);
+      if (lines.length > 0) return lines.slice(0, 3);
+    }
+  } catch {}
+
+  // Try regex extract
+  const match = text.match(/\{[\s\S]*"lines"[\s\S]*\}/);
+  if (match) {
+    try {
+      const json = JSON.parse(match[0]);
+      if (Array.isArray(json?.lines)) {
+        const lines = json.lines
+          .map((l) => sanitizePersonaDialogueText(String(l || "")))
+          .filter(Boolean);
+        if (lines.length > 0) return lines.slice(0, 3);
+      }
+    } catch {}
+  }
+
+  // Fallback: treat as single line
+  const single = sanitizePersonaDialogueText(text, fallback);
+  return single ? [single] : [];
 }
 
 export function sanitizePersonaDialogueText(text, fallback = "") {

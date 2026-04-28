@@ -10,6 +10,8 @@ import {
 import {
   buildPersonaDialoguePrompt,
   getPersonaDialogueConfig,
+  parsePersonaDialogueLines,
+  pickRandomMood,
   sanitizePersonaDialogueText,
 } from "../src/dialogue/persona-ai.js";
 
@@ -200,6 +202,7 @@ describe("persona AI helpers", () => {
       message: "Updated the overlay queue.",
       project: "devflow-live2d",
       task: "Ship persona chat",
+      recentContext: "",
     });
   });
 
@@ -211,7 +214,7 @@ describe("persona AI helpers", () => {
       message: "No new protocol events",
     });
 
-    expect(prompt).toContain("只输出一句中文");
+    expect(prompt).toContain("2~3 句中文闲聊台词");
     expect(prompt).toContain("场景: idle");
     expect(prompt).toContain("项目: devflow-live2d");
     expect(prompt).toContain("任务: Ship persona chat");
@@ -240,5 +243,52 @@ describe("persona AI helpers", () => {
     expect(enabled.enabled).toBe(true);
     expect(enabled.model).toBe("gpt-5.1-mini");
     expect(enabled.timeoutMs).toBe(4000);
+  });
+
+  it("parses multi-line JSON response into lines array", () => {
+    const lines = parsePersonaDialogueLines(
+      '{"lines":["好无聊啊","要不摸会鱼","算了还是干活吧"]}',
+    );
+    expect(lines).toEqual(["好无聊啊", "要不摸会鱼", "算了还是干活吧"]);
+  });
+
+  it("extracts JSON from noisy model output", () => {
+    const lines = parsePersonaDialogueLines(
+      'Sure! Here is the output:\n{"lines":["搞定了","给自己鼓个掌"]}\n',
+    );
+    expect(lines).toEqual(["搞定了", "给自己鼓个掌"]);
+  });
+
+  it("falls back to single line when response is plain text", () => {
+    const lines = parsePersonaDialogueLines("好无聊啊想吃零食", "fallback");
+    expect(lines).toEqual(["好无聊啊想吃零食"]);
+  });
+
+  it("uses fallback when response is empty", () => {
+    const lines = parsePersonaDialogueLines("", "先待命。");
+    expect(lines).toEqual(["先待命。"]);
+  });
+
+  it("limits output to 3 lines max", () => {
+    const lines = parsePersonaDialogueLines(
+      '{"lines":["一","二","三","四","五"]}',
+    );
+    expect(lines.length).toBeLessThanOrEqual(3);
+  });
+
+  it("pickRandomMood returns a string", () => {
+    const mood = pickRandomMood(() => 0.5);
+    expect(typeof mood).toBe("string");
+    expect(mood.length).toBeGreaterThan(0);
+  });
+
+  it("prompt includes mood and multi-line instruction", () => {
+    const prompt = buildPersonaDialoguePrompt({
+      category: "success",
+      mood: "突然亢奋",
+    });
+    expect(prompt).toContain("当前情绪: 突然亢奋");
+    expect(prompt).toContain("2~3 句中文闲聊台词");
+    expect(prompt).toContain('"lines"');
   });
 });

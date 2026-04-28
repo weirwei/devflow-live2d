@@ -1,7 +1,7 @@
 import { getPersonaLines } from "./persona-lines.js";
 
-export const PERSONA_EVENT_COOLDOWN_MS = 18_000;
-export const PERSONA_IDLE_COOLDOWN_MS = 90_000;
+export const PERSONA_EVENT_COOLDOWN_MS = 10_000;
+export const PERSONA_IDLE_COOLDOWN_MS = 45_000;
 export const PERSONA_IDLE_THRESHOLD_MS = 30_000;
 export const PERSONA_STRONG_EVENT_BLOCK_MS = 3_200;
 export const PERSONA_POLL_INTERVAL_MS = 1_000;
@@ -185,7 +185,39 @@ export class PersonaChatController {
   }
 }
 
-export function buildPersonaRequestContext(personaItem, normalizedEvent = null) {
+const RECENT_EVENTS_MAX = 6;
+
+export class RecentEventTracker {
+  constructor(maxSize = RECENT_EVENTS_MAX) {
+    this.maxSize = maxSize;
+    this.events = [];
+  }
+
+  push(normalized) {
+    if (!normalized) return;
+    const summary = String(
+      normalized.message || normalized.rawType || "",
+    ).trim();
+    if (!summary) return;
+    this.events.push({
+      type: normalized.rawType || "",
+      summary: summary.slice(0, 60),
+      ts: normalized.timestamp || Date.now(),
+    });
+    if (this.events.length > this.maxSize) {
+      this.events.splice(0, this.events.length - this.maxSize);
+    }
+  }
+
+  summarize() {
+    if (this.events.length === 0) return "";
+    return this.events
+      .map((e) => e.summary)
+      .join("；");
+  }
+}
+
+export function buildPersonaRequestContext(personaItem, normalizedEvent = null, recentContext = "") {
   return {
     category: personaItem?.category || "",
     fallbackText: personaItem?.text || "",
@@ -193,5 +225,6 @@ export function buildPersonaRequestContext(personaItem, normalizedEvent = null) 
     message: normalizedEvent?.message || "",
     project: normalizedEvent?.project || "",
     task: normalizedEvent?.task?.title || normalizedEvent?.task?.detail || "",
+    recentContext: typeof recentContext === "string" ? recentContext : "",
   };
 }

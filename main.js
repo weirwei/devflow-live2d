@@ -37,7 +37,7 @@ import {
   getPersonaDialogueConfig,
   normalizePersonaDialogueSettings,
   resolvePersonaDialogueConfig,
-  sanitizePersonaDialogueText,
+  parsePersonaDialogueLines,
 } from "./src/dialogue/persona-ai.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -61,7 +61,7 @@ const AVATAR_BEHAVIOR_PRESETS = [
   { key: "shake", mood: "alert", label: "警示", description: "失败 / 摇头" },
 ];
 const PERSONA_DIALOGUE_SYSTEM_PROMPT =
-  "You write one short Chinese desktop-avatar line. Return plain text only.";
+  '你是一个桌面 Live2D 桌宠的台词生成器。只输出纯 JSON，格式: {"lines":["第一句","第二句"]}。不要 markdown、不要解释。';
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
@@ -138,8 +138,8 @@ async function generatePersonaDialogueViaApi(input, config) {
           { role: "system", content: PERSONA_DIALOGUE_SYSTEM_PROMPT },
           { role: "user", content: prompt },
         ],
-        temperature: 0.9,
-        max_tokens: 80,
+        temperature: 0.92,
+        max_tokens: 150,
       }),
       signal: controller.signal,
     });
@@ -170,12 +170,12 @@ async function generatePersonaDialogueViaApi(input, config) {
       }
     } catch {}
 
-    const text = sanitizePersonaDialogueText(content, input.fallbackText || "");
-    if (!text) {
-      return { ok: false, text: "", reason: "empty" };
+    const lines = parsePersonaDialogueLines(content, input.fallbackText || "");
+    if (lines.length === 0) {
+      return { ok: false, text: "", lines: [], reason: "empty" };
     }
 
-    return { ok: true, text, provider: "openai-compatible", model: config.model };
+    return { ok: true, text: lines[0], lines, provider: "openai-compatible", model: config.model };
   } catch (error) {
     return {
       ok: false,
