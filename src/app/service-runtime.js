@@ -64,9 +64,11 @@ export class DesktopServiceRuntime {
     this.protocolBaseUrl = protocolBaseUrl;
     this.processes = {
       protocol: null,
+      codexBridge: null,
     };
     this.lastErrors = {
       protocol: "",
+      codexBridge: "",
     };
   }
 
@@ -83,6 +85,10 @@ export class DesktopServiceRuntime {
 
   getProtocolBinary() {
     return path.join(this.getProtocolSourceRoot(), "bin", "devflow-protocol");
+  }
+
+  getCodexBridgeScript() {
+    return path.join(this.getProtocolSourceRoot(), "claude-plugin", "codex", "bridge_rollout.py");
   }
 
   getClaudePluginSourceRoot() {
@@ -117,6 +123,14 @@ export class DesktopServiceRuntime {
     return path.join(this.getLogDir(), "devflow-protocol.log");
   }
 
+  getCodexBridgeLogPath() {
+    return path.join(this.getLogDir(), "codex-bridge.log");
+  }
+
+  getCodexBridgeStatePath() {
+    return path.join(this.getRuntimeDataRoot(), "codex-bridge-state.json");
+  }
+
   getPluginStateDir() {
     return path.join(this.getClaudePluginInstallRoot(), ".devflow-plugin-state");
   }
@@ -125,6 +139,7 @@ export class DesktopServiceRuntime {
     return {
       bash: this.resolveCommandBinary("bash"),
       node: this.resolveCommandBinary("node"),
+      python3: this.resolveCommandBinary("python3"),
     };
   }
 
@@ -150,6 +165,12 @@ export class DesktopServiceRuntime {
         logPath: this.getProtocolLogPath(),
         lastError: this.lastErrors.protocol || "",
       },
+      codexBridge: {
+        running: Boolean(this.processes.codexBridge),
+        pid: this.processes.codexBridge?.pid || null,
+        logPath: this.getCodexBridgeLogPath(),
+        lastError: this.lastErrors.codexBridge || "",
+      },
       claudePlugin: {
         installed: this.isClaudeGlobalPluginInstalled(),
         installRoot: this.getClaudePluginInstallRoot(),
@@ -158,6 +179,7 @@ export class DesktopServiceRuntime {
       capabilities: {
         bash: Boolean(capabilities.bash),
         node: Boolean(capabilities.node),
+        python3: Boolean(capabilities.python3),
       },
     };
   }
@@ -292,12 +314,67 @@ export class DesktopServiceRuntime {
   }
 
   async stopProtocol() {
+    await this.stopCodexBridge();
     return this.stopManagedProcess("protocol");
   }
 
   async restartProtocol() {
     await this.stopProtocol();
     return this.startProtocol();
+  }
+
+  async startCodexBridge() {
+    if (this.processes.codexBridge) return this.getStatus().codexBridge;
+
+    try {
+      const bridgeScript = this.getCodexBridgeScript();
+      this.verifySourceExists(bridgeScript, "Codex bridge script");
+      this.ensurePathsForRuntime();
+
+      const pythonBinary = this.resolveCommandBinary("python3");
+      if (!pythonBinary) {
+        throw new Error("Codex bridge requires python3");
+      }
+
+      if (!this.processes.protocol) {
+        await this.startProtocol();
+      }
+
+      this.spawnManagedProcess({
+        key: "codexBridge",
+        command: pythonBinary,
+        args: [
+          bridgeScript,
+          "--protocol-url",
+          this.protocolBaseUrl,
+          "--state-file",
+          this.getCodexBridgeStatePath(),
+          "--backfill-recent-minutes",
+          "20",
+        ],
+        cwd: this.getProtocolSourceRoot(),
+        env: {
+          PYTHONUNBUFFERED: "1",
+        },
+        logPath: this.getCodexBridgeLogPath(),
+        label: "codex-bridge",
+      });
+
+      this.lastErrors.codexBridge = "";
+      return this.getStatus().codexBridge;
+    } catch (error) {
+      this.lastErrors.codexBridge = error instanceof Error ? error.message : String(error);
+      throw error;
+    }
+  }
+
+  async stopCodexBridge() {
+    return this.stopManagedProcess("codexBridge");
+  }
+
+  async restartCodexBridge() {
+    await this.stopCodexBridge();
+    return this.startCodexBridge();
   }
 
   getRequiredPluginFiles() {
@@ -495,6 +572,7 @@ export class DesktopServiceRuntime {
   }
 
   async shutdown() {
+    await this.stopCodexBridge();
     await this.stopProtocol();
   }
 }

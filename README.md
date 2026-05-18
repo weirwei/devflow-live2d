@@ -40,6 +40,12 @@ The desktop app can now be packaged as a macOS app and includes a bundled copy o
 - tray menu can start and stop the Codex bridge
 - tray menu can install and uninstall the Claude global `devflow-protocol` plugin
 
+The Codex bridge tails `~/.codex/sessions/**/rollout-*.jsonl` through the
+bundled `devflow-protocol-go/claude-plugin/codex/bridge_rollout.py` script and
+forwards Codex runtime records into the local protocol service. The tray launch
+uses `--backfill-recent-minutes 20`, so recent Codex activity appears
+immediately after the bridge starts.
+
 ### Packaging
 
 ```bash

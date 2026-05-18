@@ -22,7 +22,6 @@
   "build": {
     "appId": "com.devflow.live2d",
     "productName": "Devflow Live2D",
-    "electronDist": "/Users/weirwei/Downloads",
     "directories": {
       "buildResources": "build-resources",
       "output": "dist"

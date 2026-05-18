@@ -205,6 +205,7 @@ function createDefaultState() {
     allWorkspaces: true,
     hidden: false,
     panelCollapsed: true,
+    codexBridgeEnabled: false,
     selectedModelId: DEFAULT_LIVE2D_MODEL_ID,
     avatarTuning: {
       scale: 100,
@@ -252,6 +253,7 @@ function buildState(partial = {}, current = DEFAULT_STATE) {
       DEFAULT_PROTOCOL_BASE_URL,
     ),
     selectedModelId: model.id,
+    codexBridgeEnabled: Boolean(partial.codexBridgeEnabled ?? current.codexBridgeEnabled),
     avatarTuning: normalizeAvatarTuning({
       ...current.avatarTuning,
       ...(partial.avatarTuning || {}),
@@ -637,6 +639,7 @@ class DesktopApp {
       protocolBaseUrl: DEFAULT_PROTOCOL_BASE_URL,
     });
     this.menuActionInFlight = false;
+    this.serviceWatchTimer = null;
   }
 
   getPublicState() {
@@ -713,6 +716,27 @@ class DesktopApp {
         this.broadcastState();
       }
     };
+  }
+
+  async ensureWantedServices() {
+    const state = this.store.get();
+    if (!state.codexBridgeEnabled) return;
+    if (this.runtime.getStatus().codexBridge.running) return;
+
+    try {
+      await this.runtime.startCodexBridge();
+      this.broadcastState();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("[devflow-live2d] failed to start Codex bridge:", message);
+    }
+  }
+
+  startServiceWatchdog() {
+    if (this.serviceWatchTimer) return;
+    this.serviceWatchTimer = setInterval(() => {
+      void this.ensureWantedServices();
+    }, 5000);
   }
 
   buildTrayMenu() {
@@ -944,6 +968,32 @@ class DesktopApp {
             ],
           },
           {
+            label: "Codex bridge",
+            submenu: [
+              {
+                label: state.codexBridgeEnabled
+                  ? runtimeStatus.codexBridge.running
+                    ? `Codex bridge 已开启（PID: ${runtimeStatus.codexBridge.pid}）`
+                    : "Codex bridge 已开启，等待启动"
+                  : "Codex bridge 未开启",
+                enabled: false,
+              },
+              {
+                label: state.codexBridgeEnabled ? "关闭 Codex bridge" : "开启 Codex bridge",
+                enabled: runtimeStatus.capabilities.python3,
+                click: this.withMenuAction("toggle Codex bridge", async () => {
+                  if (this.store.get().codexBridgeEnabled) {
+                    this.updateState({ codexBridgeEnabled: false });
+                    await this.runtime.stopCodexBridge();
+                  } else {
+                    this.updateState({ codexBridgeEnabled: true });
+                    await this.runtime.startCodexBridge();
+                  }
+                }),
+              },
+            ],
+          },
+          {
             label: "Claude 全局插件",
             submenu: [
               {
@@ -977,13 +1027,25 @@ class DesktopApp {
               void shell.openPath(this.runtime.getLogDir());
             },
           },
-          ...(runtimeStatus.protocol.lastError
+          ...(runtimeStatus.protocol.lastError || runtimeStatus.codexBridge.lastError
             ? [
                 { type: "separator" },
-                {
-                  label: `最近错误: ${runtimeStatus.protocol.lastError}`.slice(0, 140),
-                  enabled: false,
-                },
+                ...(runtimeStatus.protocol.lastError
+                  ? [
+                      {
+                        label: `protocol 最近错误: ${runtimeStatus.protocol.lastError}`.slice(0, 140),
+                        enabled: false,
+                      },
+                    ]
+                  : []),
+                ...(runtimeStatus.codexBridge.lastError
+                  ? [
+                      {
+                        label: `Codex bridge 最近错误: ${runtimeStatus.codexBridge.lastError}`.slice(0, 140),
+                        enabled: false,
+                      },
+                    ]
+                  : []),
               ]
             : []),
         ],
@@ -1037,9 +1099,12 @@ class DesktopApp {
     this.broadcastState();
     this.registerIpc();
     this.registerShortcuts();
+    this.startServiceWatchdog();
     void this.runtime.startProtocol().catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
       console.error("[devflow-live2d] failed to start devflow-protocol:", message);
+    }).then(() => {
+      void this.ensureWantedServices();
     });
   }
 }
