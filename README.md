@@ -1,5 +1,7 @@
 # devflow-live2d
 
+![Devflow Live2D desktop overlay demo](docs/demo.png)
+
 `devflow-live2d` is the macOS desktop overlay app in the split architecture.
 
 ## Responsibility
