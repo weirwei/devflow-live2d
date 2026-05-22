@@ -124,13 +124,13 @@ describe("avatar state projection", () => {
 
 describe("model behavior preview mapping", () => {
   it("maps shared motion keys to model-specific motion and expression names", () => {
-    const natori = getLive2DModelById("natori");
-    const hiyori = getLive2DModelById("hiyori");
+    const nito = getLive2DModelById("nito");
+    const nico = getLive2DModelById("nico");
 
-    expect(natori.motions.celebrate).toBe("TapBody");
-    expect(natori.expressions.happy).toBe("Smile");
-    expect(hiyori.motions.acknowledge).toBe("TapBody");
-    expect(hiyori.expressions.happy).toBeUndefined();
+    expect(nito.motions.celebrate).toBe("Flick3");
+    expect(nico.manifestModel.basePath).toBe("assets/live2d/models/nito-runtime");
+    expect(nico.defaults.motion).toBe("Relaxed");
+    expect(nico.motions.celebrate).toBe("Happy");
   });
 });
 

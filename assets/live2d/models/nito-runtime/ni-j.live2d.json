@@ -1,0 +1,85 @@
+{
+  "version": 1,
+  "id": "nij",
+  "name": "Ni-J",
+  "enabled": true,
+  "runtime": {
+    "engine": "external-official",
+    "resourcesRoot": "nito"
+  },
+  "model": {
+    "id": "ni-j-runtime",
+    "basePath": "assets/live2d/models/nito-runtime",
+    "modelJson": "ni-j.model3.json",
+    "runtimeResourcesRoot": "nito",
+    "runtimeModelJson": "ni-j.model3.json"
+  },
+  "layout": {
+    "scale": 1,
+    "offsetX": 0,
+    "offsetY": 0,
+    "runtimeWidth": 1.08,
+    "centerX": 0.45,
+    "centerY": 0.12
+  },
+  "defaults": {
+    "motion": "Idle",
+    "expression": "",
+    "mood": "calm",
+    "holdMs": 0
+  },
+  "events": {
+    "request.created": {
+      "motion": "FlickUp",
+      "mood": "alert",
+      "holdMs": 1600,
+      "bubbleTone": "alert"
+    },
+    "task.updated": {
+      "motion": "Tap",
+      "mood": "focus"
+    },
+    "task.completed": {
+      "motion": "Flick3",
+      "mood": "happy",
+      "holdMs": 1600,
+      "bubbleTone": "success"
+    },
+    "tool.started": {
+      "motion": "Idle",
+      "mood": "focus"
+    },
+    "tool.completed": {
+      "motion": "Flick3",
+      "mood": "happy",
+      "holdMs": 1600,
+      "bubbleTone": "success"
+    },
+    "usage.updated": {
+      "motion": "FlickDown",
+      "mood": "attentive"
+    }
+  },
+  "runtimeEvents": {
+    "connected": {
+      "motion": "Tap",
+      "mood": "attentive"
+    },
+    "error": {
+      "motion": "Shake",
+      "mood": "alert",
+      "holdMs": 1600,
+      "bubbleTone": "warning"
+    }
+  },
+  "interaction": {
+    "pointerTracking": true,
+    "maxTilt": 10,
+    "clickMotion": "task.updated"
+  },
+  "metadata": {
+    "author": "",
+    "license": "",
+    "notes": ""
+  }
+}

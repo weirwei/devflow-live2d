@@ -4,8 +4,14 @@ import process from "process";
 
 const root = process.cwd();
 const manifestPath = path.join(root, "assets/live2d/manifest.json");
-const vendorCorePath = path.join(root, "vendor/live2d-sdk/Core/live2dcubismcore.js");
-const vendorFrameworkPath = path.join(root, "vendor/live2d-sdk/Framework");
+const cubismCoreCandidates = [
+  "vendor/live2d-sdk/Core/live2dcubismcore.js",
+  "official-demo-runtime/dist/Core/live2dcubismcore.js",
+];
+const cubismFrameworkCandidates = [
+  "vendor/live2d-sdk/Framework",
+  "official-demo-runtime/dist/Framework",
+];
 
 function log(status, message) {
   console.log(`${status} ${message}`);
@@ -63,14 +69,29 @@ log("PASS", "Live2D manifest looks usable.");
 log("INFO", `Adapter: ${sdk.adapterScript}`);
 log("INFO", `Model JSON: ${path.relative(root, modelJsonPath)}`);
 
-if (fs.existsSync(vendorCorePath)) {
-  log("INFO", `Official Core detected: ${path.relative(root, vendorCorePath)}`);
+const cubismCorePath = cubismCoreCandidates.find((candidate) =>
+  fs.existsSync(path.join(root, candidate)),
+);
+const cubismFrameworkPath = cubismFrameworkCandidates.find((candidate) =>
+  fs.existsSync(path.join(root, candidate)),
+);
+
+if (cubismCorePath) {
+  log("INFO", `Official Core detected: ${cubismCorePath}`);
 } else {
-  log("WARN", "Official Cubism Core not found under vendor/live2d-sdk/Core/live2dcubismcore.js");
+  log(
+    "WARN",
+    `Official Cubism Core not found under ${cubismCoreCandidates.join(" or ")}`,
+  );
 }
 
-if (fs.existsSync(vendorFrameworkPath)) {
-  log("INFO", `Official Framework detected: ${path.relative(root, vendorFrameworkPath)}`);
+if (cubismFrameworkPath) {
+  log("INFO", `Official Framework detected: ${cubismFrameworkPath}`);
 } else {
-  log("WARN", "Official Framework not found under vendor/live2d-sdk/Framework");
+  const officialDemoCoreOnly = cubismCorePath?.startsWith("official-demo-runtime/");
+  if (officialDemoCoreOnly) {
+    log("INFO", "Official Framework is bundled into official-demo-runtime/dist/main.js");
+  } else {
+    log("WARN", `Official Framework not found under ${cubismFrameworkCandidates.join(" or ")}`);
+  }
 }

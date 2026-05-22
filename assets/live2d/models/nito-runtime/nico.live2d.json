@@ -1,0 +1,93 @@
+{
+  "version": 1,
+  "id": "nico",
+  "name": "Nico",
+  "enabled": true,
+  "runtime": {
+    "engine": "external-official",
+    "resourcesRoot": "nito"
+  },
+  "model": {
+    "id": "nico-runtime",
+    "basePath": "assets/live2d/models/nito-runtime",
+    "modelJson": "nico.model3.json",
+    "runtimeResourcesRoot": "nito",
+    "runtimeModelJson": "nico.model3.json"
+  },
+  "layout": {
+    "scale": 1,
+    "offsetX": 0,
+    "offsetY": 0,
+    "runtimeWidth": 1.08,
+    "centerX": 0.45,
+    "centerY": 0.12
+  },
+  "defaults": {
+    "motion": "Relaxed",
+    "expression": "",
+    "mood": "calm",
+    "holdMs": 0
+  },
+  "events": {
+    "session.started": {
+      "motion": "Relaxed",
+      "mood": "calm"
+    },
+    "request.created": {
+      "motion": "Reject",
+      "mood": "alert",
+      "holdMs": 1600,
+      "bubbleTone": "alert"
+    },
+    "task.updated": {
+      "motion": "Happy",
+      "mood": "focus"
+    },
+    "task.assigned": {
+      "motion": "Reject",
+      "mood": "attentive"
+    },
+    "task.completed": {
+      "motion": "Happy",
+      "mood": "happy",
+      "holdMs": 1600,
+      "bubbleTone": "success"
+    },
+    "tool.started": {
+      "motion": "Sad",
+      "mood": "focus"
+    },
+    "tool.completed": {
+      "motion": "Happy",
+      "mood": "happy",
+      "holdMs": 1600,
+      "bubbleTone": "success"
+    },
+    "usage.updated": {
+      "motion": "Sad",
+      "mood": "attentive"
+    }
+  },
+  "runtimeEvents": {
+    "connected": {
+      "motion": "Happy",
+      "mood": "attentive"
+    },
+    "error": {
+      "motion": "Confused",
+      "mood": "alert",
+      "holdMs": 1600,
+      "bubbleTone": "warning"
+    }
+  },
+  "interaction": {
+    "pointerTracking": true,
+    "maxTilt": 10,
+    "clickMotion": "task.updated"
+  },
+  "metadata": {
+    "author": "",
+    "license": "",
+    "notes": ""
+  }
+}

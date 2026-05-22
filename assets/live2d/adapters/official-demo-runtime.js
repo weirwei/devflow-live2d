@@ -152,12 +152,19 @@ async function createOfficialAdapter({ container, manifest }) {
     centerX: manifest.model?.centerX,
     centerY: manifest.model?.centerY,
   };
+  const resourcesBaseUrl = toRuntimeModuleUrl("assets/live2d/models/");
+  const resourcesRoot = String(manifest.model.basePath || "")
+    .replace(/^assets\/live2d\/models\//, "")
+    .replace(/\/+$/, "");
   const modelConfig = {
-    resourcesRoot: manifest.model?.runtimeResourcesRoot,
+    resourcesRoot: resourcesRoot || ".",
     modelJson: manifest.model?.runtimeModelJson || manifest.model?.modelJson,
+    defaultMotion: manifest.defaults?.motion,
   };
   window.DevflowLive2DBaseUrl = baseUrl;
   window.BackstageLive2DBaseUrl = baseUrl;
+  window.DevflowLive2DResourcesBaseUrl = resourcesBaseUrl;
+  window.BackstageLive2DResourcesBaseUrl = resourcesBaseUrl;
   window.DevflowLive2DModelLayout = modelLayout;
   window.BackstageLive2DModelLayout = modelLayout;
   window.DevflowLive2DModelConfig = modelConfig;
@@ -195,6 +202,7 @@ async function createOfficialAdapter({ container, manifest }) {
   }
 
   runtimeApi.initialize({ mountElement: root });
+  let lastPlaybackKey = "";
 
   return {
     async setState(state) {
@@ -205,6 +213,15 @@ async function createOfficialAdapter({ container, manifest }) {
       if (badge) {
         badge.textContent = `${manifest.model.name}: ${state.motion}`;
       }
+
+      const playbackKey = [
+        state.motion || "",
+        state.expression || "",
+        state.mood || "",
+        state.updatedAt || "",
+      ].join("\u0000");
+      if (playbackKey === lastPlaybackKey) return;
+      lastPlaybackKey = playbackKey;
 
       if (typeof runtimeApi.setState === "function") {
         runtimeApi.setState(state);

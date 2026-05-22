@@ -1,5 +1,10 @@
-import { getLive2DModelById } from "./live2d-model-catalog.js";
-import { DEFAULT_LIVE2D_MODEL_ID } from "./live2d-model-catalog.js";
+import {
+  DEFAULT_LIVE2D_MODEL_ID,
+  LIVE2D_MODEL_CATALOG,
+  LIVE2D_MODEL_CONFIG_PATHS,
+  createLive2DModelCatalog,
+  getLive2DModelById,
+} from "./live2d-model-catalog.js";
 
 const DEFAULT_MANIFEST_PATH = "assets/live2d/manifest.json";
 
@@ -29,12 +34,28 @@ export async function loadManifest(manifestPath = DEFAULT_MANIFEST_PATH) {
   }
 }
 
+export async function loadModelCatalog(configPaths = LIVE2D_MODEL_CONFIG_PATHS) {
+  const configs = [];
+  for (const configPath of configPaths) {
+    try {
+      const text = await readText(configPath);
+      configs.push(JSON.parse(text));
+    } catch (error) {
+      console.warn(`Failed to load Live2D model config ${configPath}.`, error);
+    }
+  }
+
+  const catalog = createLive2DModelCatalog(configs);
+  return catalog.length > 0 ? catalog : LIVE2D_MODEL_CATALOG;
+}
+
 export async function resolveRuntimeConfig() {
   const manifestResult = await loadManifest();
+  const modelCatalog = await loadModelCatalog();
   const overlayState = window.desktopAPI?.getOverlayState
     ? await window.desktopAPI.getOverlayState()
     : { selectedModelId: DEFAULT_LIVE2D_MODEL_ID };
-  const selectedModel = getLive2DModelById(overlayState?.selectedModelId);
+  const selectedModel = getLive2DModelById(overlayState?.selectedModelId, modelCatalog);
 
   if (!manifestResult.ok || !manifestResult.manifest) {
     return {
@@ -44,6 +65,7 @@ export async function resolveRuntimeConfig() {
       adapterScript: "",
       manifest: null,
       selectedModel,
+      modelCatalog,
     };
   }
 
@@ -62,6 +84,10 @@ export async function resolveRuntimeConfig() {
       ...(manifest.expressions || {}),
       ...(selectedModel.expressions || {}),
     },
+    defaults: {
+      ...(manifest.defaults || {}),
+      ...(selectedModel.defaults || {}),
+    },
     selectedModelId: selectedModel.id,
     selectedModelName: selectedModel.name,
   };
@@ -73,5 +99,6 @@ export async function resolveRuntimeConfig() {
     adapterScript: merged.sdk?.adapterScript || "",
     manifest: merged,
     selectedModel,
+    modelCatalog,
   };
 }

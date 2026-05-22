@@ -1,58 +1,113 @@
 # Live2D assets
 
-This directory is where you place your licensed Cubism Web SDK integration files and model assets.
+This directory contains the Live2D integration used by the desktop overlay.
+The current app intentionally ships only the `nito-runtime` model set.
 
-## Why these files are not committed
-
-Live2D Cubism Core is not published on GitHub and is distributed through the official Cubism SDK for Web package. Model assets also vary by license and ownership. Because of that, this repository only ships the integration seam and a mock avatar fallback.
-
-Official references:
-
-- [Cubism SDK for Web](https://docs.live2d.com/en/cubism-sdk-manual/cubism-sdk-for-web/)
-- [About Models (Web)](https://docs.live2d.com/en/cubism-sdk-manual/model-web/)
-- [Cubism Web Framework](https://github.com/Live2D/CubismWebFramework)
-- [Cubism Web Samples](https://github.com/Live2D/CubismWebSamples)
-
-## Expected layout
+## Current layout
 
 ```text
 assets/live2d/
   manifest.json
   adapters/
-    cubism-official-adapter.js
+    official-demo-runtime.js
   models/
-    your-model/
-      your-model.model3.json
-      your-model.moc3
-      motions/
-      expressions/
-      textures/
+    nito-runtime/
+      nito.live2d.json
+      nico.live2d.json
+      ni-j.live2d.json
+      nipsilon.live2d.json
+      nietzsche.live2d.json
+      *.model3.json
+      motion/
+      */*.moc3
+      */*.pose3.json
+      */*.cdi3.json
 ```
 
-## Manifest contract
+`manifest.json` still defines the default runtime adapter and default model, but the selectable model catalog is loaded from the editable `*.live2d.json` files in `models/nito-runtime/`.
 
-Copy `manifest.example.json` to `manifest.json` and adjust the paths to match your local SDK adapter and model.
+## Model catalog
 
-The desktop app reads this file at startup. If it is missing or invalid, the app falls back to the mock avatar.
+The active config list is defined in `src/live2d-model-catalog.js` as `LIVE2D_MODEL_CONFIG_PATHS`. It currently points only to:
 
-## Adapter template
+- `assets/live2d/models/nito-runtime/nito.live2d.json`
+- `assets/live2d/models/nito-runtime/nico.live2d.json`
+- `assets/live2d/models/nito-runtime/ni-j.live2d.json`
+- `assets/live2d/models/nito-runtime/nipsilon.live2d.json`
+- `assets/live2d/models/nito-runtime/nietzsche.live2d.json`
 
-You can start from:
+Do not add another model directory unless you also add its config path and commit the model assets it references.
 
-- `assets/live2d/adapters/cubism-official-adapter.example.js`
+## Per-model behavior config
 
-Then copy it to the path used by `sdk.adapterScript` in your manifest and replace the stub logic with your actual Cubism Web SDK integration.
+Each Live2D model variant has its own editable config file. The `events` map is keyed directly by protocol event type, while `runtimeEvents` covers local app connection states.
 
-## Official SDK import path
+```json
+{
+  "defaults": {
+    "motion": "Idle",
+    "expression": "",
+    "mood": "calm",
+    "holdMs": 0
+  },
+  "events": {
+    "request.created": {
+      "motion": "FlickUp",
+      "mood": "alert",
+      "holdMs": 1600,
+      "bubbleTone": "alert"
+    },
+    "task.completed": {
+      "motion": "Flick3",
+      "mood": "happy",
+      "holdMs": 1600,
+      "bubbleTone": "success"
+    }
+  },
+  "runtimeEvents": {
+    "connected": {
+      "motion": "Tap",
+      "mood": "attentive"
+    },
+    "error": {
+      "motion": "Shake",
+      "mood": "alert",
+      "holdMs": 1600,
+      "bubbleTone": "warning"
+    }
+  }
+}
+```
 
-When you download the official Cubism SDK for Web package from Live2D, import it into this app with:
+Supported protocol event keys are listed in `PROTOCOL_EVENT_TYPES`; local runtime event keys are listed in `RUNTIME_EVENT_TYPES`.
+
+## Motion groups and preview
+
+The tray menu `模型行为预览` reads the selected model's own `.model3.json` and displays motion groups with their array members. Clicking a member plays that exact motion index.
+
+For Nico, the motion groups are intentionally reclassified in `nico.model3.json`:
+
+- `Happy`
+- `Relaxed`
+- `Reject`
+- `Sad`
+- `Confused`
+
+Nico's default motion is `Relaxed`, so runtime fallback returns to `Relaxed` instead of assuming an `Idle` group.
+
+## Runtime resources
+
+The official demo runtime no longer depends on duplicate files under `official-demo-runtime/dist/Resources`. The adapter points the runtime at `assets/live2d/models/`, and the model config selects the relevant `resourcesRoot`/`modelJson`.
+
+This avoids keeping a second copy of the same model assets in the runtime output directory.
+
+## Validation
+
+Run these after changing model configs or `.model3.json` motion groups:
 
 ```bash
-cd apps/live2d-desktop
-npm run import:official-sdk -- /absolute/path/to/CubismSdkForWeb
+npm run doctor
+npm test
 ```
 
-That copies:
-
-- `Core/` -> `vendor/live2d-sdk/Core/`
-- `Framework/` -> `vendor/live2d-sdk/Framework/`
+`npm run doctor` checks the manifest, adapter, default model JSON, and bundled official runtime files. `npm test` also validates JavaScript syntax and the Live2D behavior mapping tests.

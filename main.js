@@ -17,7 +17,10 @@ import { fileURLToPath } from "url";
 import {
   DEFAULT_LIVE2D_MODEL_ID,
   LIVE2D_MODEL_CATALOG,
+  LIVE2D_MODEL_CONFIG_PATHS,
+  createLive2DModelCatalog,
   getLive2DModelById,
+  resolveModelEventBehavior,
 } from "./src/live2d-model-catalog.js";
 import { IPC_CHANNELS } from "./src/ipc-channels.js";
 import {
@@ -51,17 +54,21 @@ const DEFAULT_PROTOCOL_BASE_URL =
   process.env.DEVFLOW_PROTOCOL_URL?.trim() || "http://127.0.0.1:4317";
 const OVERLAY_WIDTH = 420;
 const OVERLAY_HEIGHT = 720;
-const AVATAR_BEHAVIOR_PRESETS = [
-  { key: "idleWave", mood: "calm", label: "空闲", description: "待机 / 轻微呼吸" },
-  { key: "acknowledge", mood: "attentive", label: "响应", description: "收到任务 / 点头" },
-  { key: "greet", mood: "alert", label: "招呼", description: "新请求 / 提醒" },
-  { key: "workLoop", mood: "focus", label: "工作中", description: "执行中 / 专注" },
-  { key: "ponder", mood: "thinking", label: "思考", description: "推理 / 犹豫" },
-  { key: "celebrate", mood: "happy", label: "完成", description: "成功 / 开心" },
-  { key: "shake", mood: "alert", label: "警示", description: "失败 / 摇头" },
-];
 const PERSONA_DIALOGUE_SYSTEM_PROMPT =
   '你是一个桌面 Live2D 桌宠的台词生成器。只输出纯 JSON，格式: {"lines":["第一句","第二句"]}。不要 markdown、不要解释。';
+
+function loadLive2DModelCatalogFromFiles() {
+  const configs = [];
+  for (const configPath of LIVE2D_MODEL_CONFIG_PATHS) {
+    try {
+      const raw = fs.readFileSync(path.resolve(__dirname, configPath), "utf-8");
+      configs.push(JSON.parse(raw));
+    } catch {}
+  }
+
+  const catalog = createLive2DModelCatalog(configs);
+  return catalog.length > 0 ? catalog : LIVE2D_MODEL_CATALOG;
+}
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
@@ -224,26 +231,80 @@ function createDefaultState() {
 
 const DEFAULT_STATE = createDefaultState();
 
-function getAvatarBehaviorPreviewOptions(model) {
-  const motionMap = model?.motions || {};
-  const expressionMap = model?.expressions || {};
+function readModel3Json(model) {
+  const manifestModel = model?.manifestModel || model?.model || {};
+  const basePath = manifestModel.basePath;
+  const modelJson = manifestModel.modelJson || manifestModel.runtimeModelJson;
+  if (!basePath || !modelJson) return null;
 
-  return AVATAR_BEHAVIOR_PRESETS.map((preset) => {
-    const mappedMotion = motionMap[preset.key] || preset.key;
-    const mappedExpression = expressionMap[preset.mood] || preset.mood;
+  try {
+    const modelJsonPath = path.resolve(__dirname, basePath, modelJson);
+    return JSON.parse(fs.readFileSync(modelJsonPath, "utf-8"));
+  } catch {
+    return null;
+  }
+}
+
+function motionMemberLabel(filePath = "", index = 0) {
+  const fileName = path.basename(String(filePath || ""), ".motion3.json");
+  return fileName.replace(/^\d+[_\s-]*/, "") || `Motion ${index + 1}`;
+}
+
+function getModelMotionGroups(model) {
+  const model3 = readModel3Json(model);
+  const motions = model3?.FileReferences?.Motions;
+  if (!motions || typeof motions !== "object") return [];
+  return Object.entries(motions)
+    .filter(([motion]) => Boolean(motion))
+    .map(([motion, entries]) => ({
+      motion,
+      members: Array.isArray(entries)
+        ? entries.map((entry, index) => ({
+            index,
+            file: String(entry?.File || ""),
+            label: motionMemberLabel(entry?.File, index),
+          }))
+        : [],
+    }));
+}
+
+function getEventLabelsForMotion(model, motion) {
+  const labels = [];
+  for (const [eventType, behavior] of Object.entries(model?.events || {})) {
+    if (behavior?.motion === motion) labels.push(eventType);
+  }
+  for (const [eventType, behavior] of Object.entries(model?.runtimeEvents || {})) {
+    if (behavior?.motion === motion) labels.push(eventType);
+  }
+  return labels;
+}
+
+function getAvatarBehaviorPreviewOptions(model) {
+  return getModelMotionGroups(model).map(({ motion, members }) => {
+    const eventLabels = getEventLabelsForMotion(model, motion);
+    const primaryEventType = eventLabels[0] || "";
+    const behavior = primaryEventType
+      ? resolveModelEventBehavior(model, primaryEventType)
+      : model?.defaults || {};
+    const expression = behavior.expression || model?.defaults?.expression || "";
+    const mood = behavior.mood || model?.defaults?.mood || "calm";
     return {
-      ...preset,
-      mappedMotion,
-      mappedExpression,
-      label: `${preset.label} · ${preset.key} -> ${mappedMotion}${
-        mappedExpression ? ` · 表情 ${mappedExpression}` : ""
-      }`,
+      eventType: primaryEventType,
+      mood,
+      motion,
+      expression,
+      label: motion,
+      description: motion,
+      members,
     };
   });
 }
 
 function buildState(partial = {}, current = DEFAULT_STATE) {
-  const model = getLive2DModelById(partial.selectedModelId ?? current.selectedModelId);
+  const model = getLive2DModelById(
+    partial.selectedModelId ?? current.selectedModelId,
+    loadLive2DModelCatalogFromFiles(),
+  );
   const fallbackWindowBounds = current.windowBounds ?? DEFAULT_STATE.windowBounds;
   return {
     ...current,
@@ -280,7 +341,10 @@ class OverlayStateStore {
       avatarTuning: { ...this.state.avatarTuning },
       personaDialogue: { ...this.state.personaDialogue },
       windowBounds: this.state.windowBounds ? { ...this.state.windowBounds } : null,
-      selectedModel: getLive2DModelById(this.state.selectedModelId),
+      selectedModel: getLive2DModelById(
+        this.state.selectedModelId,
+        loadLive2DModelCatalogFromFiles(),
+      ),
     };
   }
 
@@ -741,8 +805,9 @@ class DesktopApp {
 
   buildTrayMenu() {
     const state = this.store.get();
+    const modelCatalog = loadLive2DModelCatalogFromFiles();
     const currentScale = state.avatarTuning.scale;
-    const currentModel = getLive2DModelById(state.selectedModelId);
+    const currentModel = getLive2DModelById(state.selectedModelId, modelCatalog);
     const currentModelId = currentModel.id;
     const presetScales = [50, 60, 70, 80, 100, 120];
     const behaviorOptions = getAvatarBehaviorPreviewOptions(currentModel);
@@ -779,7 +844,7 @@ class DesktopApp {
       { type: "separator" },
       {
         label: "模型",
-        submenu: LIVE2D_MODEL_CATALOG.map((model) => ({
+        submenu: modelCatalog.map((model) => ({
           label: model.name,
           type: "radio",
           checked: currentModelId === model.id,
@@ -794,18 +859,25 @@ class DesktopApp {
           behaviorOptions.length > 0
             ? behaviorOptions.map((behavior) => ({
                 label: behavior.label,
-                click: () => {
-                  console.log(
-                    `[devflow-live2d] preview behavior ${currentModel.id} ${behavior.key} -> ${behavior.mappedMotion} / ${behavior.mappedExpression}`,
-                  );
-                  this.overlay.broadcast(IPC_CHANNELS.PREVIEW_AVATAR_STATE, {
-                    mood: behavior.mood,
-                    expression: behavior.mood,
-                    motion: behavior.key,
-                    source: "tray-preview",
-                    label: behavior.description,
-                  });
-                },
+                submenu:
+                  behavior.members.length > 0
+                    ? behavior.members.map((member) => ({
+                        label: member.label,
+                        click: () => {
+                          console.log(
+                            `[devflow-live2d] preview motion ${currentModel.id} ${behavior.motion}[${member.index}] ${member.file}`,
+                          );
+                          this.overlay.broadcast(IPC_CHANNELS.PREVIEW_AVATAR_STATE, {
+                            mood: behavior.mood,
+                            expression: behavior.expression,
+                            motion: behavior.motion,
+                            motionIndex: member.index,
+                            source: "tray-preview",
+                            label: `${behavior.description} / ${member.label}`,
+                          });
+                        },
+                      }))
+                    : [{ label: "当前分组无可用动作", enabled: false }],
               }))
             : [{ label: "当前模型无可用行为", enabled: false }],
       },

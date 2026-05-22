@@ -15,7 +15,11 @@ import {
   RecentEventTracker,
 } from "../src/dialogue/persona-chat.js";
 import { deriveStatusBubble } from "../src/status-bubble.js";
-import { getLive2DModelById } from "../src/live2d-model-catalog.js";
+import {
+  LIVE2D_MODEL_CATALOG,
+  getLive2DModelById,
+  resolveModelEventBehavior,
+} from "../src/live2d-model-catalog.js";
 import {
   resolveAvatarInterrupt,
   shouldHoldAvatarState,
@@ -29,6 +33,7 @@ const PERSONA_MOTION_BY_MOOD = {
   thinking: "ponder",
   happy: "celebrate",
 };
+const PREVIEW_AVATAR_HOLD_MS = 2200;
 
 const appState = {
   protocolBaseUrl: DEFAULT_PROTOCOL_BASE_URL,
@@ -41,6 +46,7 @@ const appState = {
     id: "mock",
     selectedModelId: "",
     selectedModelName: "Unknown",
+    modelCatalog: LIVE2D_MODEL_CATALOG,
     layoutBase: {
       runtimeWidth: 1.1,
       centerX: 0.45,
@@ -74,6 +80,7 @@ const appState = {
 let runtimeSwitching = false;
 let personaTickTimer = null;
 let personaGenerationInFlight = false;
+let previewReplaySeq = 0;
 const dialogueQueue = new DialogueQueue({
   maxSize: 40,
   defaultDurationMs: 3800,
@@ -154,10 +161,32 @@ function scheduleBubbleLayout() {
   });
 }
 
+function resolveModelAvatarState(avatarState) {
+  const model = getLive2DModelById(
+    appState.runtime.selectedModelId,
+    appState.runtime.modelCatalog,
+  );
+  return {
+    ...avatarState,
+    motion:
+      model?.motions?.[avatarState.motion] ||
+      avatarState.motion ||
+      model?.defaults?.motion ||
+      "Idle",
+    expression:
+      model?.expressions?.[avatarState.expression] ||
+      model?.expressions?.[avatarState.mood] ||
+      (typeof avatarState.expression === "string"
+        ? avatarState.expression
+        : model?.defaults?.expression || avatarState.mood),
+  };
+}
+
 async function renderAvatarFrame() {
   if (!appState.adapter) return;
+  const resolvedAvatarState = resolveModelAvatarState(appState.avatarState);
   await appState.adapter.setState({
-    avatarState: appState.avatarState,
+    avatarState: resolvedAvatarState,
     interactionState: appState.interaction,
   });
 }
@@ -244,9 +273,18 @@ function applyPersonaMoodHint(personaItem) {
   return true;
 }
 
+function modelBehaviorForEvent(normalized) {
+  const model = getLive2DModelById(
+    appState.runtime.selectedModelId,
+    appState.runtime.modelCatalog,
+  );
+  return resolveModelEventBehavior(model, normalized.rawType);
+}
+
 function applyNormalizedEventToAvatar(normalized) {
   const now = normalized.timestamp || Date.now();
   const nextAvatarState = reduceNormalizedEvent(appState.avatarState, normalized);
+  const behavior = modelBehaviorForEvent(normalized);
   const decision = resolveAvatarInterrupt(appState.avatarInterruptGuard, normalized, now);
 
   if (decision.guard) {
@@ -261,7 +299,25 @@ function applyNormalizedEventToAvatar(normalized) {
     return false;
   }
 
-  appState.avatarState = nextAvatarState;
+  if (Number.isFinite(behavior.holdMs) && behavior.holdMs > 0) {
+    const guard = {
+      kind: normalized.kind,
+      until: now + behavior.holdMs,
+    };
+    appState.avatarInterruptGuard = guard;
+    scheduleAvatarInterruptRelease(guard);
+  }
+
+  appState.avatarState = {
+    ...nextAvatarState,
+    mood: behavior.mood || nextAvatarState.mood,
+    motion: behavior.motion || nextAvatarState.motion,
+    motionIndex: undefined,
+    expression:
+      typeof behavior.expression === "string"
+        ? behavior.expression
+        : nextAvatarState.expression,
+  };
   return true;
 }
 
@@ -347,9 +403,14 @@ function maybeQueuePersonaFromEvent(normalized) {
 
 function pushBubble(normalized) {
   recentEvents.push(normalized);
+  const behavior = modelBehaviorForEvent(normalized);
   const statusItem = deriveStatusBubble(normalized);
   if (statusItem) {
-    dialogueQueue.enqueue(statusItem);
+    dialogueQueue.enqueue({
+      ...statusItem,
+      tone: behavior.bubbleTone || statusItem.tone,
+      channel: behavior.bubbleChannel || statusItem.channel,
+    });
     if (shouldHoldAvatarState(normalized)) {
       personaController.noteQueueActivity("strong", normalized.timestamp || Date.now());
     }
@@ -457,6 +518,7 @@ async function initializeRuntime() {
     id: config.runtimeId,
     selectedModelId: config.selectedModel.id,
     selectedModelName: config.selectedModel.name,
+    modelCatalog: config.modelCatalog || LIVE2D_MODEL_CATALOG,
     layoutBase: {
       runtimeWidth: config.manifest?.model?.runtimeWidth ?? 1.1,
       centerX: config.manifest?.model?.centerX ?? 0.45,
@@ -556,36 +618,71 @@ function bindAssistantQueue() {
 
 function bindAvatarBehaviorPreview() {
   window.desktopAPI?.onPreviewAvatarState?.((payload = {}) => {
+    const previewSeq = ++previewReplaySeq;
     appState.avatarInterruptGuard = null;
     clearAvatarInterruptTimer();
     const nextMood = payload.mood || "calm";
     const nextMotion = payload.motion || "idleWave";
+    const nextMotionIndex = Number.isInteger(payload.motionIndex) ? payload.motionIndex : 0;
     const nextExpression = payload.expression || nextMood;
-    const model = getLive2DModelById(appState.runtime.selectedModelId);
-    const mappedMotion = model?.motions?.[nextMotion] || nextMotion;
-    const mappedExpression = model?.expressions?.[nextMood] || nextExpression;
+    const model = getLive2DModelById(
+      appState.runtime.selectedModelId,
+      appState.runtime.modelCatalog,
+    );
 
-    appState.avatarState = {
-      ...appState.avatarState,
-      mood: nextMood,
-      motion: nextMotion,
-      expression: nextExpression,
-      lastEventType: "tray.preview",
-      source: payload.source || "tray-preview",
-      updatedAt: Date.now(),
+    const applyPreviewState = (avatarPatch) => {
+      appState.avatarState = {
+        ...appState.avatarState,
+        ...avatarPatch,
+        lastEventType: "tray.preview",
+        source: payload.source || "tray-preview",
+        updatedAt: Date.now(),
+      };
+      void renderAvatarFrame();
     };
+
+    const resetMotion = model?.defaults?.motion || "Idle";
+    const shouldResetBeforePreview = nextMotion !== resetMotion;
+    if (shouldResetBeforePreview) {
+      applyPreviewState({
+        mood: model?.defaults?.mood || "calm",
+        motion: resetMotion,
+        motionIndex: 0,
+        expression: model?.defaults?.expression || "",
+      });
+    }
+
+    const applyRequestedPreview = () => {
+      if (previewSeq !== previewReplaySeq) return;
+      applyPreviewState({
+        mood: nextMood,
+        motion: nextMotion,
+        motionIndex: nextMotionIndex,
+        expression: nextExpression,
+      });
+      const guard = {
+        kind: "preview",
+        until: Date.now() + PREVIEW_AVATAR_HOLD_MS,
+      };
+      appState.avatarInterruptGuard = guard;
+      scheduleAvatarInterruptRelease(guard);
+    };
+
+    if (shouldResetBeforePreview) {
+      setTimeout(applyRequestedPreview, 80);
+    } else {
+      applyRequestedPreview();
+    }
 
     appState.bubble = {
       ...appState.bubble,
       status: payload.previewStatus || `${model.name} 行为预览`,
-      text:
-        payload.previewText ||
-        `${payload.label || nextMotion} · motion ${nextMotion} -> ${mappedMotion} · expression ${nextMood} -> ${mappedExpression}`,
+      text: payload.previewText || payload.label || nextMotion,
       tone: "neutral",
       channel: "system",
     };
 
-    renderAll();
+    renderBubble();
   });
 }
 
