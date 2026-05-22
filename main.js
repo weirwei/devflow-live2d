@@ -44,6 +44,7 @@ import {
 } from "./src/dialogue/persona-ai.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const TRAY_TEMPLATE_ICON_PATH = path.join(__dirname, "assets", "app", "trayTemplate.png");
 const SETTINGS_FILE_NAME = "devflow-live2d-settings.json";
 const DEVFLOW_CONFIG_DIR = path.join(homedir(), ".devflow", "live2d");
 const DEVFLOW_CONFIG_FILE = path.join(DEVFLOW_CONFIG_DIR, "config.json");
@@ -520,7 +521,7 @@ class OverlayWindowController {
       minimizable: true,
       movable: true,
       roundedCorners: false,
-      title: "Devflow Live2D Desktop",
+      title: "DPartner",
       backgroundColor: "#00000000",
       show: false,
       skipTaskbar: true,
@@ -633,20 +634,7 @@ class TrayController {
   }
 
   buildIcon() {
-    const svg = `
-      <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18">
-        <g fill="black">
-          <rect x="2" y="2" width="14" height="14" rx="4"/>
-          <rect x="5.2" y="6.1" width="1.8" height="1.8" rx="0.9" fill="white"/>
-          <rect x="11" y="6.1" width="1.8" height="1.8" rx="0.9" fill="white"/>
-          <path d="M5.5 11.1c1.2 1.4 2.3 2 3.5 2 1.2 0 2.3-.6 3.5-2" fill="none" stroke="white" stroke-width="1.4" stroke-linecap="round"/>
-        </g>
-      </svg>
-    `.trim();
-
-    const icon = nativeImage.createFromDataURL(
-      `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`,
-    );
+    const icon = nativeImage.createFromPath(TRAY_TEMPLATE_ICON_PATH);
     icon.setTemplateImage(true);
     return icon.resize({ width: 18, height: 18 });
   }
@@ -656,7 +644,7 @@ class TrayController {
     if (process.platform === "darwin") {
       this.tray.setTitle("D");
     }
-    this.tray.setToolTip("Devflow Live2D");
+    this.tray.setToolTip("DPartner");
     this.tray.setIgnoreDoubleClickEvents(true);
     this.tray.on("click", () => this.showMenu());
     this.tray.on("right-click", () => this.showMenu());

@@ -22,7 +22,7 @@
   },
   "build": {
     "appId": "com.devflow.live2d",
-    "productName": "Devflow Live2D",
+    "productName": "DPartner",
     "directories": {
       "buildResources": "build-resources",
       "output": "dist"
@@ -47,6 +47,7 @@
     ],
     "mac": {
       "category": "public.app-category.developer-tools",
+      "icon": "build-resources/icon.icns",
       "target": [
         "dmg",
         "zip"

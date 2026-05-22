@@ -8,6 +8,8 @@ pnpm-debug.log*
 agent.md
 claude.md
 .spec-workflow
-build-resources/
+build-resources/*
+!build-resources/icon.icns
+!build-resources/icon.png
 dist/
 .claude
