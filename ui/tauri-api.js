@@ -9,6 +9,11 @@
     updateOverlayState: (partialState) => invoke("update_overlay_state", { partialState }),
     openOverlayMenu: () => invoke("open_overlay_menu"),
     quitApp: () => invoke("quit_app"),
+    readTextFile: async (relativePath) => {
+      const response = await fetch(`../${relativePath}`);
+      if (response.ok) return response.text();
+      return invoke("read_text_file", { relativePath });
+    },
     generatePersonaDialogue: (payload) => invoke("generate_persona_dialogue", { payload }),
     onPreviewAvatarState: (callback) => {
       let unlisten = null;

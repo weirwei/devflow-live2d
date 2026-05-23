@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     fs,
+    net::{SocketAddr, TcpStream},
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::Mutex,
@@ -12,6 +14,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Wry,
 };
+use tauri_plugin_global_shortcut::{Code, Modifiers, ShortcutState};
 
 const WINDOW_LABEL: &str = "main";
 const STATE_EVENT: &str = "overlay-state";
@@ -24,6 +27,7 @@ const DEVFLOW_CONFIG_FILE: &str = ".devflow/live2d/config.json";
 struct ModelInfo {
     id: String,
     name: String,
+    config: Value,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -59,7 +63,9 @@ struct AppBackend {
 type BackendState = Mutex<AppBackend>;
 
 fn home_dir() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn project_root() -> PathBuf {
@@ -125,14 +131,23 @@ fn normalize_state(mut state: Value, models: &[ModelInfo]) -> Value {
         .unwrap_or_else(|| "nito".to_string());
     state["selectedModelId"] = Value::String(selected);
 
-    let tuning = state.get("avatarTuning").cloned().unwrap_or(default["avatarTuning"].clone());
+    let tuning = state
+        .get("avatarTuning")
+        .cloned()
+        .unwrap_or(default["avatarTuning"].clone());
     state["avatarTuning"] = json!({
         "scale": clamp_number(tuning.get("scale").and_then(Value::as_f64), 100.0, 50.0, 150.0),
         "offsetX": clamp_number(tuning.get("offsetX").and_then(Value::as_f64), 0.0, -220.0, 220.0),
         "offsetY": clamp_number(tuning.get("offsetY").and_then(Value::as_f64), 0.0, -220.0, 220.0)
     });
 
-    if state.get("protocolBaseUrl").and_then(Value::as_str).unwrap_or("").trim().is_empty() {
+    if state
+        .get("protocolBaseUrl")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .is_empty()
+    {
         state["protocolBaseUrl"] = Value::String(DEFAULT_PROTOCOL_BASE_URL.to_string());
     }
 
@@ -149,8 +164,11 @@ fn write_json(path: &Path, value: &Value) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
-    fs::write(path, serde_json::to_string_pretty(value).map_err(|error| error.to_string())?)
-        .map_err(|error| error.to_string())
+    fs::write(
+        path,
+        serde_json::to_string_pretty(value).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -196,39 +214,224 @@ fn load_models() -> Vec<ModelInfo> {
             .and_then(Value::as_str)
             .unwrap_or(&id)
             .to_string();
-        models.push(ModelInfo { id, name });
+        let config = normalize_model_config(json, &id, &name);
+        models.push(ModelInfo { id, name, config });
     }
 
     if models.is_empty() {
         models.push(ModelInfo {
             id: "nito".to_string(),
             name: "Nito".to_string(),
+            config: json!({
+                "id": "nito",
+                "name": "Nito",
+                "defaults": { "motion": "Idle", "expression": "", "mood": "calm", "holdMs": 0 },
+                "events": {},
+                "runtimeEvents": {},
+                "manifestModel": { "id": "nito", "name": "Nito" }
+            }),
         });
     }
     models
 }
 
+fn clean_string(value: Option<&Value>, fallback: &str) -> String {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(fallback)
+        .to_string()
+}
+
+fn clean_number(value: Option<&Value>, fallback: f64) -> f64 {
+    value.and_then(Value::as_f64).unwrap_or(fallback)
+}
+
+fn normalize_behavior(value: Option<&Value>, fallback: &Value) -> Value {
+    let object = value.and_then(Value::as_object);
+    let fallback_motion = fallback
+        .get("motion")
+        .and_then(Value::as_str)
+        .unwrap_or("Idle");
+    let fallback_expression = fallback
+        .get("expression")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let fallback_mood = fallback
+        .get("mood")
+        .and_then(Value::as_str)
+        .unwrap_or("calm");
+    let fallback_hold = fallback
+        .get("holdMs")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    json!({
+        "motion": object.and_then(|map| map.get("motion")).and_then(Value::as_str).unwrap_or(fallback_motion),
+        "expression": object.and_then(|map| map.get("expression")).and_then(Value::as_str).unwrap_or(fallback_expression),
+        "mood": object.and_then(|map| map.get("mood")).and_then(Value::as_str).unwrap_or(fallback_mood),
+        "holdMs": object.and_then(|map| map.get("holdMs")).and_then(Value::as_f64).unwrap_or(fallback_hold).max(0.0),
+        "bubbleTone": object.and_then(|map| map.get("bubbleTone")).and_then(Value::as_str).unwrap_or(""),
+        "bubbleChannel": object.and_then(|map| map.get("bubbleChannel")).and_then(Value::as_str).unwrap_or("")
+    })
+}
+
+fn normalize_behavior_map(value: Option<&Value>, fallback: &Value) -> Value {
+    let Some(map) = value.and_then(Value::as_object) else {
+        return json!({});
+    };
+    let mut output = serde_json::Map::new();
+    for (event, behavior) in map {
+        output.insert(event.clone(), normalize_behavior(Some(behavior), fallback));
+    }
+    Value::Object(output)
+}
+
+fn behavior_map_to_legacy_motions(events: &Value, runtime_events: &Value) -> Value {
+    let mappings = [
+        ("idleWave", "session.started"),
+        ("acknowledge", "task.updated"),
+        ("greet", "request.created"),
+        ("workLoop", "tool.started"),
+        ("ponder", "usage.updated"),
+        ("celebrate", "task.completed"),
+        ("shake", "error"),
+    ];
+    let mut output = serde_json::Map::new();
+    for (legacy, event) in mappings {
+        let motion = events
+            .pointer(&format!("/{event}/motion"))
+            .or_else(|| runtime_events.pointer(&format!("/{event}/motion")))
+            .and_then(Value::as_str);
+        if let Some(motion) = motion {
+            output.insert(legacy.to_string(), Value::String(motion.to_string()));
+        }
+    }
+    Value::Object(output)
+}
+
+fn behavior_map_to_legacy_expressions(events: &Value, runtime_events: &Value) -> Value {
+    let mut output = serde_json::Map::new();
+    for behavior in events
+        .as_object()
+        .into_iter()
+        .flat_map(|map| map.values())
+        .chain(
+            runtime_events
+                .as_object()
+                .into_iter()
+                .flat_map(|map| map.values()),
+        )
+    {
+        let mood = behavior.get("mood").and_then(Value::as_str).unwrap_or("");
+        let expression = behavior
+            .get("expression")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if !mood.is_empty() && !expression.is_empty() {
+            output.insert(mood.to_string(), Value::String(expression.to_string()));
+        }
+    }
+    Value::Object(output)
+}
+
+fn normalize_model_config(raw: Value, id: &str, name: &str) -> Value {
+    let model = raw.get("model").unwrap_or(&Value::Null);
+    let layout = raw.get("layout").unwrap_or(&Value::Null);
+    let runtime = raw.get("runtime").unwrap_or(&Value::Null);
+    let defaults = normalize_behavior(
+        raw.get("defaults"),
+        &json!({ "motion": "Idle", "expression": "", "mood": "calm", "holdMs": 0 }),
+    );
+    let events = normalize_behavior_map(raw.get("events"), &defaults);
+    let runtime_events = normalize_behavior_map(raw.get("runtimeEvents"), &defaults);
+    let base_path = clean_string(model.get("basePath"), &format!("assets/live2d/models/{id}"));
+    let model_json = clean_string(model.get("modelJson"), &format!("{id}.model3.json"));
+    let runtime_resources_root = clean_string(
+        runtime
+            .get("resourcesRoot")
+            .or_else(|| model.get("runtimeResourcesRoot")),
+        base_path.trim_start_matches("assets/live2d/models/"),
+    );
+    let runtime_model_json = clean_string(model.get("runtimeModelJson"), &model_json);
+    json!({
+        "version": clean_number(raw.get("version"), 1.0),
+        "id": id,
+        "name": name,
+        "enabled": raw.get("enabled").and_then(Value::as_bool).unwrap_or(true),
+        "runtime": {
+            "engine": clean_string(runtime.get("engine"), "external-official"),
+            "resourcesRoot": runtime_resources_root
+        },
+        "model": {
+            "basePath": base_path,
+            "modelJson": model_json,
+            "runtimeResourcesRoot": runtime_resources_root,
+            "runtimeModelJson": runtime_model_json
+        },
+        "layout": {
+            "runtimeWidth": clean_number(layout.get("runtimeWidth"), 1.1),
+            "centerX": clean_number(layout.get("centerX"), 0.45),
+            "centerY": clean_number(layout.get("centerY"), 0.12),
+            "scale": clean_number(layout.get("scale"), 1.0),
+            "offsetX": clean_number(layout.get("offsetX"), 0.0),
+            "offsetY": clean_number(layout.get("offsetY"), 0.0)
+        },
+        "defaults": defaults,
+        "events": events,
+        "runtimeEvents": runtime_events,
+        "interaction": raw.get("interaction").cloned().unwrap_or_else(|| json!({})),
+        "metadata": raw.get("metadata").cloned().unwrap_or_else(|| json!({})),
+        "manifestModel": {
+            "id": clean_string(model.get("id"), id),
+            "name": name,
+            "basePath": base_path,
+            "modelJson": model_json,
+            "runtimeResourcesRoot": runtime_resources_root,
+            "runtimeModelJson": runtime_model_json,
+            "runtimeWidth": clean_number(layout.get("runtimeWidth"), 1.1),
+            "centerX": clean_number(layout.get("centerX"), 0.45),
+            "centerY": clean_number(layout.get("centerY"), 0.12),
+            "scale": clean_number(layout.get("scale"), 1.0),
+            "offsetX": clean_number(layout.get("offsetX"), 0.0),
+            "offsetY": clean_number(layout.get("offsetY"), 0.0)
+        },
+        "motions": behavior_map_to_legacy_motions(&events, &runtime_events),
+        "expressions": behavior_map_to_legacy_expressions(&events, &runtime_events)
+    })
+}
+
 fn public_state(app: &AppHandle, backend: &AppBackend) -> Value {
     let mut state = backend.state.clone();
-    let selected = state.get("selectedModelId").and_then(Value::as_str).unwrap_or("nito");
+    let selected = state
+        .get("selectedModelId")
+        .and_then(Value::as_str)
+        .unwrap_or("nito");
     let selected_model = backend
         .models
         .iter()
         .find(|model| model.id == selected)
         .or_else(|| backend.models.first())
-        .cloned();
-    state["selectedModel"] = serde_json::to_value(selected_model).unwrap_or(Value::Null);
+        .map(|model| model.config.clone());
+    state["selectedModel"] = selected_model.unwrap_or(Value::Null);
     state["platform"] = Value::String(std::env::consts::OS.to_string());
     state["focused"] = Value::Bool(false);
-    state["runtimeStatus"] = serde_json::to_value(runtime_status(app, backend)).unwrap_or(Value::Null);
+    state["runtimeStatus"] =
+        serde_json::to_value(runtime_status(app, backend)).unwrap_or(Value::Null);
 
-    if let Some(persona) = state.get_mut("personaDialogue").and_then(Value::as_object_mut) {
+    if let Some(persona) = state
+        .get_mut("personaDialogue")
+        .and_then(Value::as_object_mut)
+    {
         let configured = persona
             .get("apiKey")
             .and_then(Value::as_str)
             .map(|key| !key.trim().is_empty())
             .unwrap_or(false)
-            || !std::env::var("OPENAI_API_KEY").unwrap_or_default().trim().is_empty();
+            || !std::env::var("OPENAI_API_KEY")
+                .unwrap_or_default()
+                .trim()
+                .is_empty();
         persona.remove("apiKey");
         persona.insert("configured".to_string(), Value::Bool(configured));
     }
@@ -248,15 +451,28 @@ fn apply_window_state(app: &AppHandle, state: &Value) {
     let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
         return;
     };
-    let hidden = state.get("hidden").and_then(Value::as_bool).unwrap_or(false);
+    let hidden = state
+        .get("hidden")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     if hidden {
         let _ = window.hide();
     } else {
         let _ = window.show();
     }
-    let _ = window.set_always_on_top(state.get("alwaysOnTop").and_then(Value::as_bool).unwrap_or(true));
+    let _ = window.set_always_on_top(
+        state
+            .get("alwaysOnTop")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+    );
     let _ = window.set_skip_taskbar(true);
-    let _ = window.set_ignore_cursor_events(state.get("clickThrough").and_then(Value::as_bool).unwrap_or(false));
+    let _ = window.set_ignore_cursor_events(
+        state
+            .get("clickThrough")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    );
 }
 
 fn persist_state(app: &AppHandle, backend: &AppBackend) -> Result<(), String> {
@@ -266,7 +482,10 @@ fn persist_state(app: &AppHandle, backend: &AppBackend) -> Result<(), String> {
         .get("personaDialogue")
         .cloned()
         .unwrap_or_else(|| json!({}));
-    write_json(&persona_config_path(), &json!({ "personaDialogue": persona }))?;
+    write_json(
+        &persona_config_path(),
+        &json!({ "personaDialogue": persona }),
+    )?;
     Ok(())
 }
 
@@ -317,7 +536,10 @@ fn claude_plugin_source(app: &AppHandle) -> PathBuf {
         project_root().join("../devflow-protocol-go/claude-plugin")
     } else {
         app.path()
-            .resolve("bundle/devflow-protocol-go/claude-plugin", tauri::path::BaseDirectory::Resource)
+            .resolve(
+                "bundle/devflow-protocol-go/claude-plugin",
+                tauri::path::BaseDirectory::Resource,
+            )
             .unwrap_or_else(|_| PathBuf::from("bundle/devflow-protocol-go/claude-plugin"))
     }
 }
@@ -331,14 +553,21 @@ fn append_log(path: &Path, text: &str) {
         let _ = fs::create_dir_all(parent);
     }
     let line = format!("[{}] {text}\n", chrono_like_timestamp());
-    let _ = fs::OpenOptions::new().create(true).append(true).open(path).and_then(|mut file| {
-        use std::io::Write;
-        file.write_all(line.as_bytes())
-    });
+    let _ = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| {
+            use std::io::Write;
+            file.write_all(line.as_bytes())
+        });
 }
 
 fn chrono_like_timestamp() -> String {
-    let output = Command::new("date").arg("-u").arg("+%Y-%m-%dT%H:%M:%SZ").output();
+    let output = Command::new("date")
+        .arg("-u")
+        .arg("+%Y-%m-%dT%H:%M:%SZ")
+        .output();
     output
         .ok()
         .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
@@ -359,7 +588,11 @@ fn start_protocol(app: &AppHandle, backend: &mut AppBackend) -> Result<(), Strin
     fs::create_dir_all(&data_dir).map_err(|error| error.to_string())?;
     let log_path = protocol_log_path(app);
     append_log(&log_path, &format!("protocol starting: {}", bin.display()));
-    let stdout = fs::OpenOptions::new().create(true).append(true).open(&log_path).map_err(|e| e.to_string())?;
+    let stdout = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| e.to_string())?;
     let stderr = stdout.try_clone().map_err(|e| e.to_string())?;
     let child = Command::new(&bin)
         .env("HOST", "127.0.0.1")
@@ -371,13 +604,50 @@ fn start_protocol(app: &AppHandle, backend: &mut AppBackend) -> Result<(), Strin
         .map_err(|error| error.to_string())?;
     backend.protocol = Some(ManagedChild { child });
     backend.protocol_last_error.clear();
+    if !wait_for_protocol_port(Duration::from_secs(4)) {
+        backend.protocol_last_error =
+            "devflow-protocol started but health port did not become ready".to_string();
+        append_log(&log_path, &backend.protocol_last_error);
+    }
     Ok(())
+}
+
+fn wait_for_protocol_port(timeout: Duration) -> bool {
+    let addr: SocketAddr = match "127.0.0.1:4317".parse() {
+        Ok(addr) => addr,
+        Err(_) => return false,
+    };
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    false
 }
 
 fn stop_child(child: &mut Option<ManagedChild>) {
     if let Some(mut managed) = child.take() {
         let _ = managed.child.kill();
         let _ = managed.child.wait();
+    }
+}
+
+fn child_exited(child: &mut Option<ManagedChild>) -> bool {
+    let Some(managed) = child.as_mut() else {
+        return false;
+    };
+    match managed.child.try_wait() {
+        Ok(Some(_)) => {
+            *child = None;
+            true
+        }
+        Ok(None) => false,
+        Err(_) => {
+            *child = None;
+            true
+        }
     }
 }
 
@@ -393,11 +663,16 @@ fn start_codex_bridge(app: &AppHandle, backend: &mut AppBackend) -> Result<(), S
     }
     let script = codex_bridge_script(app);
     if !script.exists() {
-        backend.codex_bridge_last_error = format!("Codex bridge script not found: {}", script.display());
+        backend.codex_bridge_last_error =
+            format!("Codex bridge script not found: {}", script.display());
         return Err(backend.codex_bridge_last_error.clone());
     }
     let log_path = codex_log_path(app);
-    let stdout = fs::OpenOptions::new().create(true).append(true).open(&log_path).map_err(|e| e.to_string())?;
+    let stdout = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| e.to_string())?;
     let stderr = stdout.try_clone().map_err(|e| e.to_string())?;
     let child = Command::new(python)
         .arg(script)
@@ -430,9 +705,7 @@ fn is_claude_installed() -> bool {
     let Some(settings) = read_json(&claude_settings_path()) else {
         return false;
     };
-    let has_mcp = settings
-        .pointer("/mcpServers/devflow-protocol")
-        .is_some();
+    let has_mcp = settings.pointer("/mcpServers/devflow-protocol").is_some();
     has_mcp && plugin_root.exists()
 }
 
@@ -448,7 +721,11 @@ fn filter_hook_groups(groups: &Value, plugin_root: &Path) -> Value {
     let filtered: Vec<Value> = groups
         .iter()
         .filter(|group| {
-            let hooks = group.get("hooks").and_then(Value::as_array).cloned().unwrap_or_default();
+            let hooks = group
+                .get("hooks")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
             hooks.iter().all(|hook| {
                 !hook
                     .get("command")
@@ -472,7 +749,11 @@ fn update_claude_settings_for_install() -> Result<(), String> {
         settings["hooks"] = json!({});
     }
     let bash = resolve_command("bash");
-    let bash = if bash.is_empty() { PathBuf::from("bash") } else { PathBuf::from(bash) };
+    let bash = if bash.is_empty() {
+        PathBuf::from("bash")
+    } else {
+        PathBuf::from(bash)
+    };
     let hook_files = [
         ("SessionStart", "session-start-hook.sh"),
         ("SessionEnd", "session-end-hook.sh"),
@@ -511,11 +792,15 @@ fn update_claude_settings_for_uninstall() -> Result<(), String> {
     let mut settings = read_json(&claude_settings_path()).unwrap_or_else(|| json!({}));
     if let Some(hooks) = settings.get("hooks").and_then(Value::as_object).cloned() {
         for event_name in hooks.keys() {
-            settings["hooks"][event_name] = filter_hook_groups(&settings["hooks"][event_name], &plugin_root);
+            settings["hooks"][event_name] =
+                filter_hook_groups(&settings["hooks"][event_name], &plugin_root);
         }
     }
     if settings.pointer("/mcpServers/devflow-protocol").is_some() {
-        if let Some(servers) = settings.get_mut("mcpServers").and_then(Value::as_object_mut) {
+        if let Some(servers) = settings
+            .get_mut("mcpServers")
+            .and_then(Value::as_object_mut)
+        {
             servers.remove("devflow-protocol");
         }
     }
@@ -535,6 +820,14 @@ fn copy_dir(source: &Path, target: &Path) -> Result<(), String> {
             copy_dir(&source_path, &target_path)?;
         } else {
             fs::copy(&source_path, &target_path).map_err(|error| error.to_string())?;
+            if source_path.extension().and_then(|ext| ext.to_str()) == Some("sh") {
+                let mut permissions = fs::metadata(&target_path)
+                    .map_err(|error| error.to_string())?
+                    .permissions();
+                permissions.set_mode(0o755);
+                fs::set_permissions(&target_path, permissions)
+                    .map_err(|error| error.to_string())?;
+            }
         }
     }
     Ok(())
@@ -543,7 +836,10 @@ fn copy_dir(source: &Path, target: &Path) -> Result<(), String> {
 fn install_claude_plugin(app: &AppHandle) -> Result<(), String> {
     let source = claude_plugin_source(app);
     if !source.exists() {
-        return Err(format!("Claude plugin source not found: {}", source.display()));
+        return Err(format!(
+            "Claude plugin source not found: {}",
+            source.display()
+        ));
     }
     let target = claude_plugin_install_root();
     if let Some(parent) = target.parent() {
@@ -551,7 +847,8 @@ fn install_claude_plugin(app: &AppHandle) -> Result<(), String> {
     }
     copy_dir(&source, &target)?;
     fs::create_dir_all(target.join(".devflow-plugin-state")).map_err(|error| error.to_string())?;
-    fs::write(target.join(".devflow-plugin-state/enabled"), "").map_err(|error| error.to_string())?;
+    fs::write(target.join(".devflow-plugin-state/enabled"), "")
+        .map_err(|error| error.to_string())?;
     update_claude_settings_for_install()?;
     Ok(())
 }
@@ -572,7 +869,10 @@ fn runtime_status(app: &AppHandle, backend: &AppBackend) -> RuntimeStatus {
         protocol_log_path: protocol_log_path(app).display().to_string(),
         protocol_last_error: backend.protocol_last_error.clone(),
         codex_bridge_running: backend.codex_bridge.is_some(),
-        codex_bridge_pid: backend.codex_bridge.as_ref().map(|managed| managed.child.id()),
+        codex_bridge_pid: backend
+            .codex_bridge
+            .as_ref()
+            .map(|managed| managed.child.id()),
         codex_bridge_log_path: codex_log_path(app).display().to_string(),
         codex_bridge_last_error: backend.codex_bridge_last_error.clone(),
         claude_plugin_installed: is_claude_installed(),
@@ -597,12 +897,118 @@ fn update_tray_menu(app: &AppHandle) {
     }
 }
 
+fn motion_member_label(file_path: &str, index: usize) -> String {
+    Path::new(file_path)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .map(|name| {
+            name.trim_start_matches(|c: char| {
+                c.is_ascii_digit() || c == '_' || c == '-' || c.is_whitespace()
+            })
+            .to_string()
+        })
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| format!("Motion {}", index + 1))
+}
+
+fn model_motion_groups(model: &Value) -> Vec<(String, Vec<(usize, String, String)>)> {
+    let manifest_model = model
+        .get("manifestModel")
+        .or_else(|| model.get("model"))
+        .unwrap_or(&Value::Null);
+    let Some(base_path) = manifest_model.get("basePath").and_then(Value::as_str) else {
+        return Vec::new();
+    };
+    let Some(model_json) = manifest_model
+        .get("modelJson")
+        .or_else(|| manifest_model.get("runtimeModelJson"))
+        .and_then(Value::as_str)
+    else {
+        return Vec::new();
+    };
+    let Some(model3) = read_json(&project_root().join(base_path).join(model_json)) else {
+        return Vec::new();
+    };
+    let Some(motions) = model3
+        .pointer("/FileReferences/Motions")
+        .and_then(Value::as_object)
+    else {
+        return Vec::new();
+    };
+    motions
+        .iter()
+        .filter(|(motion, _)| !motion.is_empty())
+        .map(|(motion, entries)| {
+            let members = entries
+                .as_array()
+                .map(|items| {
+                    items
+                        .iter()
+                        .enumerate()
+                        .map(|(index, item)| {
+                            let file = item
+                                .get("File")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_string();
+                            let label = motion_member_label(&file, index);
+                            (index, file, label)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            (motion.clone(), members)
+        })
+        .collect()
+}
+
+fn event_behavior_for_motion(model: &Value, motion: &str) -> Value {
+    for group_name in ["events", "runtimeEvents"] {
+        if let Some(map) = model.get(group_name).and_then(Value::as_object) {
+            for behavior in map.values() {
+                if behavior.get("motion").and_then(Value::as_str) == Some(motion) {
+                    return behavior.clone();
+                }
+            }
+        }
+    }
+    model
+        .get("defaults")
+        .cloned()
+        .unwrap_or_else(|| json!({ "expression": "", "mood": "calm" }))
+}
+
+fn selected_model_config(backend: &AppBackend) -> Value {
+    let selected = backend
+        .state
+        .get("selectedModelId")
+        .and_then(Value::as_str)
+        .unwrap_or("nito");
+    backend
+        .models
+        .iter()
+        .find(|model| model.id == selected)
+        .or_else(|| backend.models.first())
+        .map(|model| model.config.clone())
+        .unwrap_or(Value::Null)
+}
+
 fn build_menu(app: &AppHandle, backend: &AppBackend) -> tauri::Result<tauri::menu::Menu<Wry>> {
     let state = &backend.state;
-    let selected_model = state.get("selectedModelId").and_then(Value::as_str).unwrap_or("nito");
-    let hidden = state.get("hidden").and_then(Value::as_bool).unwrap_or(false);
-    let scale = state.pointer("/avatarTuning/scale").and_then(Value::as_f64).unwrap_or(100.0) as i64;
+    let selected_model = state
+        .get("selectedModelId")
+        .and_then(Value::as_str)
+        .unwrap_or("nito");
+    let hidden = state
+        .get("hidden")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let scale = state
+        .pointer("/avatarTuning/scale")
+        .and_then(Value::as_f64)
+        .unwrap_or(100.0) as i64;
     let status = runtime_status(app, backend);
+    let current_model = selected_model_config(backend);
 
     let mut model_menu = SubmenuBuilder::new(app, "模型");
     for model in &backend.models {
@@ -614,12 +1020,90 @@ fn build_menu(app: &AppHandle, backend: &AppBackend) -> tauri::Result<tauri::men
     }
 
     let scale_menu = SubmenuBuilder::new(app, "角色大小")
-        .item(&MenuItemBuilder::with_id("scale:smaller", "缩小一点").build(app)?)
-        .item(&MenuItemBuilder::with_id("scale:larger", "放大一点").build(app)?)
+        .items(&[
+            &CheckMenuItemBuilder::with_id("scale:preset:50", "50%")
+                .checked(scale == 50)
+                .build(app)?,
+            &CheckMenuItemBuilder::with_id("scale:preset:60", "60%")
+                .checked(scale == 60)
+                .build(app)?,
+            &CheckMenuItemBuilder::with_id("scale:preset:70", "70%")
+                .checked(scale == 70)
+                .build(app)?,
+            &CheckMenuItemBuilder::with_id("scale:preset:80", "80%")
+                .checked(scale == 80)
+                .build(app)?,
+            &CheckMenuItemBuilder::with_id("scale:preset:100", "100%")
+                .checked(scale == 100)
+                .build(app)?,
+            &CheckMenuItemBuilder::with_id("scale:preset:120", "120%")
+                .checked(scale == 120)
+                .build(app)?,
+        ])
         .separator()
-        .item(&MenuItemBuilder::with_id("scale:reset", "恢复默认").build(app)?);
+        .item(&MenuItemBuilder::with_id("scale:smaller", "缩小一点").build(app)?)
+        .item(&MenuItemBuilder::with_id("scale:larger", "放大一点").build(app)?);
+
+    let mut behavior_menu = SubmenuBuilder::new(app, "模型行为预览");
+    let mut motion_groups = model_motion_groups(&current_model);
+    if motion_groups.is_empty() {
+        let mut seen = std::collections::BTreeSet::new();
+        for group_name in ["events", "runtimeEvents"] {
+            if let Some(map) = current_model.get(group_name).and_then(Value::as_object) {
+                for behavior in map.values() {
+                    if let Some(motion) = behavior
+                        .get("motion")
+                        .and_then(Value::as_str)
+                        .filter(|motion| !motion.is_empty())
+                    {
+                        seen.insert(motion.to_string());
+                    }
+                }
+            }
+        }
+        motion_groups = seen
+            .into_iter()
+            .map(|motion| (motion, Vec::new()))
+            .collect();
+    }
+    if motion_groups.is_empty() {
+        behavior_menu = behavior_menu.item(
+            &MenuItemBuilder::new("当前模型无可用行为")
+                .enabled(false)
+                .build(app)?,
+        );
+    } else {
+        for (motion, members) in motion_groups {
+            if members.is_empty() {
+                behavior_menu = behavior_menu.item(
+                    &MenuItemBuilder::with_id(format!("preview:{motion}:0"), &motion).build(app)?,
+                );
+            } else {
+                let mut motion_menu = SubmenuBuilder::new(app, &motion);
+                for (index, _file, label) in members {
+                    motion_menu = motion_menu.item(
+                        &MenuItemBuilder::with_id(format!("preview:{motion}:{index}"), &label)
+                            .build(app)?,
+                    );
+                }
+                behavior_menu = behavior_menu.item(&motion_menu.build()?);
+            }
+        }
+    }
 
     let services_menu = SubmenuBuilder::new(app, "后台服务")
+        .item(
+            &MenuItemBuilder::new(if status.protocol_running {
+                format!(
+                    "devflow-protocol 运行中 (PID: {})",
+                    status.protocol_pid.unwrap_or_default()
+                )
+            } else {
+                "devflow-protocol 未运行".to_string()
+            })
+            .enabled(false)
+            .build(app)?,
+        )
         .item(
             &MenuItemBuilder::with_id(
                 "protocol:toggle",
@@ -631,16 +1115,53 @@ fn build_menu(app: &AppHandle, backend: &AppBackend) -> tauri::Result<tauri::men
             )
             .build(app)?,
         )
+        .separator()
+        .item(
+            &MenuItemBuilder::new(
+                if state
+                    .get("codexBridgeEnabled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    if status.codex_bridge_running {
+                        format!(
+                            "Codex bridge 已开启 (PID: {})",
+                            status.codex_bridge_pid.unwrap_or_default()
+                        )
+                    } else {
+                        "Codex bridge 已开启，等待启动".to_string()
+                    }
+                } else {
+                    "Codex bridge 未开启".to_string()
+                },
+            )
+            .enabled(false)
+            .build(app)?,
+        )
         .item(
             &MenuItemBuilder::with_id(
                 "codex:toggle",
-                if state.get("codexBridgeEnabled").and_then(Value::as_bool).unwrap_or(false) {
+                if state
+                    .get("codexBridgeEnabled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
                     "关闭 Codex bridge"
                 } else {
                     "开启 Codex bridge"
                 },
             )
             .enabled(status.has_python3)
+            .build(app)?,
+        )
+        .separator()
+        .item(
+            &MenuItemBuilder::new(if status.claude_plugin_installed {
+                "Claude 全局插件 已安装"
+            } else {
+                "Claude 全局插件 未安装"
+            })
+            .enabled(false)
             .build(app)?,
         )
         .item(
@@ -656,45 +1177,109 @@ fn build_menu(app: &AppHandle, backend: &AppBackend) -> tauri::Result<tauri::men
             .build(app)?,
         )
         .separator()
+        .item(
+            &MenuItemBuilder::new(status.protocol_log_path.clone())
+                .enabled(false)
+                .build(app)?,
+        )
         .item(&MenuItemBuilder::with_id("logs:open", "打开日志目录").build(app)?);
 
     MenuBuilder::new(app)
-        .item(&MenuItemBuilder::with_id("visibility:toggle", if hidden { "显示角色" } else { "隐藏角色" }).build(app)?)
+        .item(
+            &MenuItemBuilder::with_id(
+                "visibility:toggle",
+                if hidden {
+                    "显示角色"
+                } else {
+                    "隐藏角色"
+                },
+            )
+            .build(app)?,
+        )
         .separator()
-        .item(&CheckMenuItemBuilder::with_id("alwaysOnTop:toggle", "始终置顶").checked(state.get("alwaysOnTop").and_then(Value::as_bool).unwrap_or(true)).build(app)?)
-        .item(&CheckMenuItemBuilder::with_id("allWorkspaces:toggle", "所有桌面可见").checked(state.get("allWorkspaces").and_then(Value::as_bool).unwrap_or(true)).build(app)?)
-        .item(&CheckMenuItemBuilder::with_id("clickThrough:toggle", "点击穿透").checked(state.get("clickThrough").and_then(Value::as_bool).unwrap_or(false)).build(app)?)
+        .item(
+            &CheckMenuItemBuilder::with_id("alwaysOnTop:toggle", "始终置顶")
+                .checked(
+                    state
+                        .get("alwaysOnTop")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true),
+                )
+                .build(app)?,
+        )
+        .item(
+            &CheckMenuItemBuilder::with_id("allWorkspaces:toggle", "所有桌面可见")
+                .checked(
+                    state
+                        .get("allWorkspaces")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true),
+                )
+                .build(app)?,
+        )
+        .item(
+            &CheckMenuItemBuilder::with_id("clickThrough:toggle", "点击穿透")
+                .checked(
+                    state
+                        .get("clickThrough")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                )
+                .build(app)?,
+        )
         .separator()
         .item(&model_menu.build()?)
+        .item(&behavior_menu.build()?)
         .item(&scale_menu.build()?)
-        .item(&MenuItemBuilder::with_id("preview:idle", "行为预览").build(app)?)
-        .item(&MenuItemBuilder::new(format!("当前大小: {scale}%")).enabled(false).build(app)?)
+        .item(&MenuItemBuilder::with_id("scale:reset", "恢复默认").build(app)?)
+        .item(
+            &MenuItemBuilder::new(format!("当前大小: {scale}%"))
+                .enabled(false)
+                .build(app)?,
+        )
         .separator()
         .item(&services_menu.build()?)
         .separator()
-        .item(&MenuItemBuilder::with_id("quit", "退出").accelerator("CmdOrCtrl+Q").build(app)?)
+        .item(
+            &MenuItemBuilder::with_id("quit", "退出")
+                .accelerator("CmdOrCtrl+Q")
+                .build(app)?,
+        )
         .build()
 }
 
-fn update_state_inner(app: &AppHandle, backend: &mut AppBackend, partial: Value) -> Result<Value, String> {
+fn update_state_inner(
+    app: &AppHandle,
+    backend: &mut AppBackend,
+    partial: Value,
+) -> Result<Value, String> {
     merge_value(&mut backend.state, &partial);
     backend.state = normalize_state(backend.state.clone(), &backend.models);
     apply_window_state(app, &backend.state);
     persist_state(app, backend)?;
     let public = public_state(app, backend);
-    app.emit(STATE_EVENT, public.clone()).map_err(|error| error.to_string())?;
+    app.emit(STATE_EVENT, public.clone())
+        .map_err(|error| error.to_string())?;
     Ok(public)
 }
 
 #[tauri::command]
 fn get_overlay_state(app: AppHandle, backend: tauri::State<BackendState>) -> Result<Value, String> {
-    let backend = backend.lock().map_err(|_| "backend lock poisoned".to_string())?;
+    let backend = backend
+        .lock()
+        .map_err(|_| "backend lock poisoned".to_string())?;
     Ok(public_state(&app, &backend))
 }
 
 #[tauri::command]
-fn update_overlay_state(app: AppHandle, backend: tauri::State<BackendState>, partial_state: Value) -> Result<Value, String> {
-    let mut backend = backend.lock().map_err(|_| "backend lock poisoned".to_string())?;
+fn update_overlay_state(
+    app: AppHandle,
+    backend: tauri::State<BackendState>,
+    partial_state: Value,
+) -> Result<Value, String> {
+    let mut backend = backend
+        .lock()
+        .map_err(|_| "backend lock poisoned".to_string())?;
     let next = update_state_inner(&app, &mut backend, partial_state)?;
     drop(backend);
     update_tray_menu(&app);
@@ -707,8 +1292,24 @@ fn open_overlay_menu(app: AppHandle) -> Result<Value, String> {
     let Some(state) = app.try_state::<BackendState>() else {
         return Err("backend state unavailable".to_string());
     };
-    let backend = state.lock().map_err(|_| "backend lock poisoned".to_string())?;
+    let backend = state
+        .lock()
+        .map_err(|_| "backend lock poisoned".to_string())?;
     Ok(public_state(&app, &backend))
+}
+
+#[tauri::command]
+fn read_text_file(relative_path: String) -> Result<String, String> {
+    let relative = Path::new(&relative_path);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err("relative path must stay inside the app bundle".to_string());
+    }
+    let path = project_root().join(relative);
+    fs::read_to_string(&path).map_err(|error| format!("Failed to load {}: {error}", path.display()))
 }
 
 #[tauri::command]
@@ -718,12 +1319,25 @@ fn quit_app(app: AppHandle) -> bool {
 }
 
 #[tauri::command]
-async fn generate_persona_dialogue(app: AppHandle, backend: tauri::State<'_, BackendState>, payload: Value) -> Result<Value, String> {
+async fn generate_persona_dialogue(
+    app: AppHandle,
+    backend: tauri::State<'_, BackendState>,
+    payload: Value,
+) -> Result<Value, String> {
     let settings = {
-        let backend = backend.lock().map_err(|_| "backend lock poisoned".to_string())?;
-        backend.state.get("personaDialogue").cloned().unwrap_or_else(|| json!({}))
+        let backend = backend
+            .lock()
+            .map_err(|_| "backend lock poisoned".to_string())?;
+        backend
+            .state
+            .get("personaDialogue")
+            .cloned()
+            .unwrap_or_else(|| json!({}))
     };
-    let enabled = settings.get("enabled").and_then(Value::as_bool).unwrap_or(false);
+    let enabled = settings
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let api_key = settings
         .get("apiKey")
         .and_then(Value::as_str)
@@ -735,16 +1349,29 @@ async fn generate_persona_dialogue(app: AppHandle, backend: tauri::State<'_, Bac
         return Ok(json!({ "ok": false, "text": "", "reason": "disabled" }));
     }
 
-    let api_url = settings.get("apiUrl").and_then(Value::as_str).unwrap_or("").trim();
+    let api_url = settings
+        .get("apiUrl")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
     let api_url = if api_url.ends_with("/chat/completions") || api_url.ends_with("/responses") {
         api_url.to_string()
     } else {
         format!("{}/v1/chat/completions", api_url.trim_end_matches('/'))
     };
-    let model = settings.get("model").and_then(Value::as_str).unwrap_or("gpt-4.1-mini");
-    let fallback = payload.get("fallbackText").and_then(Value::as_str).unwrap_or("");
+    let model = settings
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("gpt-4.1-mini");
+    let fallback = payload
+        .get("fallbackText")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     let prompt = format!("根据桌面 Live2D 助手状态生成一句简短中文台词。只返回 JSON: {{\"lines\":[\"...\"]}}。\n上下文: {}", payload);
-    let timeout_ms = settings.get("timeoutMs").and_then(Value::as_u64).unwrap_or(8000);
+    let timeout_ms = settings
+        .get("timeoutMs")
+        .and_then(Value::as_u64)
+        .unwrap_or(8000);
     let client = reqwest::Client::builder()
         .timeout(Duration::from_millis(timeout_ms))
         .build()
@@ -765,7 +1392,8 @@ async fn generate_persona_dialogue(app: AppHandle, backend: tauri::State<'_, Bac
         .await
         .map_err(|error| error.to_string())?;
     let raw = response.text().await.map_err(|error| error.to_string())?;
-    let parsed = serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| json!({ "choices": [{ "message": { "content": raw } }] }));
+    let parsed = serde_json::from_str::<Value>(&raw)
+        .unwrap_or_else(|_| json!({ "choices": [{ "message": { "content": raw } }] }));
     let content = parsed
         .pointer("/choices/0/message/content")
         .and_then(Value::as_str)
@@ -775,16 +1403,22 @@ async fn generate_persona_dialogue(app: AppHandle, backend: tauri::State<'_, Bac
         .ok()
         .and_then(|value| value.get("lines").and_then(Value::as_array).cloned())
         .map(|lines| {
-            lines.into_iter()
+            lines
+                .into_iter()
                 .filter_map(|line| line.as_str().map(str::trim).map(str::to_string))
                 .filter(|line| !line.is_empty())
                 .collect::<Vec<_>>()
         })
         .filter(|lines| !lines.is_empty())
         .unwrap_or_else(|| vec![content.trim().to_string()]);
-    let text = lines.first().cloned().unwrap_or_else(|| fallback.to_string());
+    let text = lines
+        .first()
+        .cloned()
+        .unwrap_or_else(|| fallback.to_string());
     let _ = app.emit(PREVIEW_EVENT, json!({ "previewText": text }));
-    Ok(json!({ "ok": true, "text": text, "lines": lines, "provider": "openai-compatible", "model": model }))
+    Ok(
+        json!({ "ok": true, "text": text, "lines": lines, "provider": "openai-compatible", "model": model }),
+    )
 }
 
 fn handle_menu(app: &AppHandle, id: &str) {
@@ -797,21 +1431,89 @@ fn handle_menu(app: &AppHandle, id: &str) {
     };
     let mut patch = json!({});
     match id {
-        "visibility:toggle" => patch["hidden"] = Value::Bool(!backend.state.get("hidden").and_then(Value::as_bool).unwrap_or(false)),
-        "alwaysOnTop:toggle" => patch["alwaysOnTop"] = Value::Bool(!backend.state.get("alwaysOnTop").and_then(Value::as_bool).unwrap_or(true)),
-        "allWorkspaces:toggle" => patch["allWorkspaces"] = Value::Bool(!backend.state.get("allWorkspaces").and_then(Value::as_bool).unwrap_or(true)),
-        "clickThrough:toggle" => patch["clickThrough"] = Value::Bool(!backend.state.get("clickThrough").and_then(Value::as_bool).unwrap_or(false)),
+        "visibility:toggle" => {
+            patch["hidden"] = Value::Bool(
+                !backend
+                    .state
+                    .get("hidden")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            )
+        }
+        "alwaysOnTop:toggle" => {
+            patch["alwaysOnTop"] = Value::Bool(
+                !backend
+                    .state
+                    .get("alwaysOnTop")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+            )
+        }
+        "allWorkspaces:toggle" => {
+            patch["allWorkspaces"] = Value::Bool(
+                !backend
+                    .state
+                    .get("allWorkspaces")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+            )
+        }
+        "clickThrough:toggle" => {
+            patch["clickThrough"] = Value::Bool(
+                !backend
+                    .state
+                    .get("clickThrough")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            )
+        }
         "scale:smaller" => {
-            let scale = backend.state.pointer("/avatarTuning/scale").and_then(Value::as_f64).unwrap_or(100.0) - 10.0;
+            let scale = backend
+                .state
+                .pointer("/avatarTuning/scale")
+                .and_then(Value::as_f64)
+                .unwrap_or(100.0)
+                - 10.0;
             patch["avatarTuning"] = json!({ "scale": scale });
         }
         "scale:larger" => {
-            let scale = backend.state.pointer("/avatarTuning/scale").and_then(Value::as_f64).unwrap_or(100.0) + 10.0;
+            let scale = backend
+                .state
+                .pointer("/avatarTuning/scale")
+                .and_then(Value::as_f64)
+                .unwrap_or(100.0)
+                + 10.0;
             patch["avatarTuning"] = json!({ "scale": scale });
         }
-        "scale:reset" => patch["avatarTuning"] = json!({ "scale": 100, "offsetX": 0, "offsetY": 0 }),
-        "preview:idle" => {
-            let _ = app.emit(PREVIEW_EVENT, json!({ "mood": "calm", "expression": "calm", "motion": "Idle", "source": "tray-preview", "label": "行为预览" }));
+        "scale:reset" => {
+            patch["avatarTuning"] = json!({ "scale": 100, "offsetX": 0, "offsetY": 0 })
+        }
+        id if id.starts_with("scale:preset:") => {
+            if let Ok(scale) = id.trim_start_matches("scale:preset:").parse::<f64>() {
+                patch["avatarTuning"] = json!({ "scale": scale });
+            }
+        }
+        id if id.starts_with("preview:") => {
+            let mut parts = id.splitn(3, ':');
+            let _ = parts.next();
+            let motion = parts.next().unwrap_or("Idle");
+            let motion_index = parts
+                .next()
+                .and_then(|raw| raw.parse::<usize>().ok())
+                .unwrap_or(0);
+            let model = selected_model_config(&backend);
+            let behavior = event_behavior_for_motion(&model, motion);
+            let _ = app.emit(
+                PREVIEW_EVENT,
+                json!({
+                    "mood": behavior.get("mood").and_then(Value::as_str).unwrap_or("calm"),
+                    "expression": behavior.get("expression").and_then(Value::as_str).unwrap_or(""),
+                    "motion": motion,
+                    "motionIndex": motion_index,
+                    "source": "tray-preview",
+                    "label": motion
+                }),
+            );
         }
         "protocol:toggle" => {
             if backend.protocol.is_some() {
@@ -842,7 +1544,9 @@ fn handle_menu(app: &AppHandle, id: &str) {
             let _ = Command::new("open").arg(log_dir(app)).spawn();
         }
         "quit" => app.exit(0),
-        id if id.starts_with("model:") => patch["selectedModelId"] = Value::String(id.trim_start_matches("model:").to_string()),
+        id if id.starts_with("model:") => {
+            patch["selectedModelId"] = Value::String(id.trim_start_matches("model:").to_string())
+        }
         _ => {}
     }
     if patch != json!({}) {
@@ -862,7 +1566,9 @@ fn load_initial_backend(app: &AppHandle) -> AppBackend {
             merge_value(&mut state, &stored);
         }
     }
-    if let Some(persona) = read_json(&persona_config_path()).and_then(|value| value.get("personaDialogue").cloned()) {
+    if let Some(persona) =
+        read_json(&persona_config_path()).and_then(|value| value.get("personaDialogue").cloned())
+    {
         state["personaDialogue"] = persona;
     }
     state = normalize_state(state, &models);
@@ -877,10 +1583,21 @@ fn load_initial_backend(app: &AppHandle) -> AppBackend {
     }
 }
 
-fn create_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
+fn create_window(app: &AppHandle, state: &Value) -> tauri::Result<WebviewWindow> {
+    let bounds = state.get("windowBounds").unwrap_or(&Value::Null);
     WebviewWindowBuilder::new(app, WINDOW_LABEL, WebviewUrl::default())
         .title("DPartner")
-        .inner_size(420.0, 720.0)
+        .inner_size(
+            bounds.get("width").and_then(Value::as_f64).unwrap_or(420.0),
+            bounds
+                .get("height")
+                .and_then(Value::as_f64)
+                .unwrap_or(720.0),
+        )
+        .position(
+            bounds.get("x").and_then(Value::as_f64).unwrap_or(0.0),
+            bounds.get("y").and_then(Value::as_f64).unwrap_or(0.0),
+        )
         .resizable(true)
         .decorations(false)
         .transparent(true)
@@ -893,19 +1610,54 @@ fn create_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_shortcuts(["CommandOrControl+Shift+X", "CommandOrControl+Shift+H"])
+                .expect("valid global shortcut definitions")
+                .with_handler(|app, shortcut, event| {
+                    if event.state != ShortcutState::Pressed {
+                        return;
+                    }
+                    let Some(state) = app.try_state::<BackendState>() else {
+                        return;
+                    };
+                    let mut backend = match state.lock() {
+                        Ok(backend) => backend,
+                        Err(_) => return,
+                    };
+                    let expected_mods = if cfg!(target_os = "macos") {
+                        Modifiers::SUPER | Modifiers::SHIFT
+                    } else {
+                        Modifiers::CONTROL | Modifiers::SHIFT
+                    };
+                    let patch = if shortcut.matches(expected_mods, Code::KeyX) {
+                        json!({ "clickThrough": false })
+                    } else if shortcut.matches(expected_mods, Code::KeyH) {
+                        json!({ "hidden": !backend.state.get("hidden").and_then(Value::as_bool).unwrap_or(false) })
+                    } else {
+                        json!({})
+                    };
+                    if patch != json!({}) {
+                        let _ = update_state_inner(app, &mut backend, patch);
+                    }
+                })
+                .build(),
+        )
         .invoke_handler(tauri::generate_handler![
             get_overlay_state,
             update_overlay_state,
             open_overlay_menu,
             quit_app,
+            read_text_file,
             generate_persona_dialogue
         ])
         .setup(|app| {
             let handle = app.handle().clone();
             let backend = load_initial_backend(&handle);
+            let initial_window_state = backend.state.clone();
             app.manage(Mutex::new(backend));
 
-            let window = create_window(&handle)?;
+            let window = create_window(&handle, &initial_window_state)?;
             {
                 let state = app.state::<BackendState>();
                 if let Ok(backend) = state.lock() {
@@ -943,6 +1695,14 @@ pub fn run() {
                 if let Some(state) = app_for_start.try_state::<BackendState>() {
                     if let Ok(mut backend) = state.lock() {
                         let _ = start_protocol(&app_for_start, &mut backend);
+                        if backend
+                            .state
+                            .get("codexBridgeEnabled")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false)
+                        {
+                            let _ = start_codex_bridge(&app_for_start, &mut backend);
+                        }
                     }
                 }
                 while start.elapsed() < Duration::from_secs(2) {
@@ -950,10 +1710,67 @@ pub fn run() {
                 }
                 broadcast_state(&app_for_start);
             });
+            let app_for_watchdog = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio_sleep(Duration::from_secs(5)).await;
+                    if let Some(state) = app_for_watchdog.try_state::<BackendState>() {
+                        let mut should_broadcast = false;
+                        if let Ok(mut backend) = state.lock() {
+                            if child_exited(&mut backend.protocol) {
+                                backend.protocol_last_error =
+                                    "devflow-protocol exited unexpectedly".to_string();
+                                should_broadcast = true;
+                            }
+                            if child_exited(&mut backend.codex_bridge) {
+                                backend.codex_bridge_last_error =
+                                    "Codex bridge exited unexpectedly".to_string();
+                                should_broadcast = true;
+                            }
+                            if backend
+                                .state
+                                .get("codexBridgeEnabled")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false)
+                                && backend.codex_bridge.is_none()
+                            {
+                                let _ = start_codex_bridge(&app_for_watchdog, &mut backend);
+                                should_broadcast = true;
+                            }
+                        }
+                        if should_broadcast {
+                            broadcast_state(&app_for_watchdog);
+                            update_tray_menu(&app_for_watchdog);
+                        }
+                    }
+                }
+            });
 
             Ok(())
         })
         .on_window_event(|window, event| {
+            if matches!(
+                event,
+                tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_)
+            ) {
+                let position = window.outer_position().ok();
+                let size = window.inner_size().ok();
+                if let (Some(position), Some(size), Some(state)) = (
+                    position,
+                    size,
+                    window.app_handle().try_state::<BackendState>(),
+                ) {
+                    if let Ok(mut backend) = state.lock() {
+                        backend.state["windowBounds"] = json!({
+                            "x": position.x,
+                            "y": position.y,
+                            "width": size.width,
+                            "height": size.height
+                        });
+                        let _ = persist_state(window.app_handle(), &backend);
+                    }
+                }
+            }
             if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
                 if let Some(state) = window.app_handle().try_state::<BackendState>() {
                     if let Ok(mut backend) = state.lock() {
