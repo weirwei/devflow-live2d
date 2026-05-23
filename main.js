@@ -641,9 +641,6 @@ class TrayController {
 
   create() {
     this.tray = new Tray(this.buildIcon());
-    if (process.platform === "darwin") {
-      this.tray.setTitle("D");
-    }
     this.tray.setToolTip("DPartner");
     this.tray.setIgnoreDoubleClickEvents(true);
     this.tray.on("click", () => this.showMenu());
