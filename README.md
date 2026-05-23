@@ -1,75 +1,91 @@
 # devflow-live2d
 
+**Languages:** English | [简体中文](README.zh-CN.md) | [日本語](README.ja.md)
+
 ![Devflow Live2D desktop overlay demo](docs/demo.png)
 
-`devflow-live2d` is the macOS desktop overlay app in the split architecture.
+`devflow-live2d` is the macOS Live2D desktop overlay client for Devflow. It runs on Electron and maps `devflow-protocol` runtime events into avatar state, motions, expressions, and speech bubbles.
 
-## Responsibility
+## Features
 
-- provide a macOS desktop overlay shell
-- consume shared protocol events
-- map events into avatar state, motion, expression, and bubbles
-- host the Live2D runtime seam and fallback renderer path
+- macOS desktop overlay and tray menu
+- Live2D official runtime adapter and fallback renderer path
+- Multi-model catalog, currently bundled with the `nito-runtime` model set
+- Protocol event mapping for avatar motions, expressions, moods, and bubble styles
+- Codex bridge: reads `~/.codex/sessions/**/rollout-*.jsonl` and forwards events to the local protocol service
+- Install and uninstall entry points for the Claude global `devflow-protocol` plugin
+- Optional AI persona dialogue generation, with the API key kept in the main process
 
-## What does not belong here
+## Scope
+
+This repository is responsible for the desktop client and Live2D presentation layer. It does not own:
 
 - raw Claude/Codex event parsing
-- shared protocol storage and ingestion
+- shared protocol storage, ingestion, or service implementation
 - pixel-office character and world logic
 
-## Migration sources from the current repo
+## Requirements
 
-- `apps/live2d-desktop/`
+- macOS
+- Node.js and npm
+- `python3`, used by the Codex bridge
+- For packaging, the sibling directory `../devflow-protocol-go` must exist and contain `bin/devflow-protocol` and `claude-plugin/`
 
-## Current status
+## Install and Develop
 
-This project now includes:
+```bash
+npm install
+npm run dev
+```
 
-- the migrated Electron tray app shell
-- Live2D model catalog, runtime registry, interaction controller, and renderer UI
-- bundled Live2D assets and official demo runtime output from the parent app
-- protocol-native event normalization for `devflow-protocol`
+Common scripts:
 
-This app is explicitly macOS-first.
+```bash
+npm run doctor
+npm test
+npm run dist:mac
+```
 
-## Bundled macOS App
+- `npm run doctor` checks the Live2D manifest, adapter, default model JSON, and official runtime resources.
+- `npm test` checks the main JavaScript files for syntax errors and runs the Bun tests.
+- `npm run dist:mac` prepares bundled protocol resources and then uses `electron-builder` to output macOS `dmg` and `zip` artifacts.
 
-The desktop app can now be packaged as a macOS app and includes a bundled copy of the sibling `devflow-protocol` project under the app resources.
+## Local Protocol Service
 
-### Behavior
+Protocol service repository: [weirwei/devflow-protocol-go](https://github.com/weirwei/devflow-protocol-go)
 
-- app launch starts `devflow-protocol` automatically
-- tray menu can start and stop the Codex bridge
-- tray menu can install and uninstall the Claude global `devflow-protocol` plugin
+The default protocol URL is:
 
-The Codex bridge tails `~/.codex/sessions/**/rollout-*.jsonl` through the
-bundled `devflow-protocol-go/claude-plugin/codex/bridge_rollout.py` script and
-forwards Codex runtime records into the local protocol service. The tray launch
-uses `--backfill-recent-minutes 20`, so recent Codex activity appears
-immediately after the bridge starts.
+```text
+http://127.0.0.1:4317
+```
 
-### Packaging
+Override it with an environment variable:
+
+```bash
+DEVFLOW_PROTOCOL_URL=http://127.0.0.1:4317 npm run dev
+```
+
+The packaged app starts the bundled `devflow-protocol-go` from app resources. The tray menu can start or stop the Codex bridge. The bridge starts with `--backfill-recent-minutes 20`, so recent Codex activity is replayed into the avatar shortly after startup.
+
+## Packaging
 
 ```bash
 npm install
 npm run dist:mac
 ```
 
-The build step copies `../devflow-protocol` into `build-resources/bundle/devflow-protocol` before packaging.
+Before packaging, `scripts/prepare-bundle-resources.mjs` copies the protocol binary and `claude-plugin` from the sibling `../devflow-protocol-go` repository into:
 
-### Host Requirements
+```text
+build-resources/bundle/devflow-protocol-go
+```
 
-The packaged app bundles project resources, but the current runtime still expects these tools to exist on the host machine:
+Packaging fails if the protocol repository or build artifacts are missing. Build `bin/devflow-protocol` in the `devflow-protocol-go` repository first.
 
-- bundled `bun` for `devflow-protocol`, the Codex bridge, and the plugin MCP server
-- bundled `jq` for Claude plugin hook scripts
-- system `bash` only for invoking hook shell scripts
+## AI Persona Dialogue Config
 
-The build step currently copies `bun` from `/Users/weirwei/.bun/bin/bun` and `jq` from `/usr/bin/jq`. You can override those source paths with `BUN_PATH` and `JQ_PATH` before running `npm run dist:mac`.
-
-## Persona Dialogue Config
-
-AI persona dialogue can be configured in:
+AI persona dialogue is configured at:
 
 ```text
 ~/.devflow/live2d/config.json
@@ -89,4 +105,62 @@ Example:
 }
 ```
 
-The tray menu `AI 闲聊` reads and updates the same config file. The API key stays in the main process and is not exposed to the renderer.
+You can also provide defaults through environment variables:
+
+```bash
+DEVFLOW_DIALOGUE_API_KEY=YOUR_API_KEY \
+DEVFLOW_DIALOGUE_MODEL=gpt-5-mini \
+npm run dev
+```
+
+Related environment variables:
+
+- `DEVFLOW_DIALOGUE_API_KEY`
+- `DEVFLOW_DIALOGUE_API_URL`
+- `DEVFLOW_DIALOGUE_MODEL`
+- `DEVFLOW_DIALOGUE_TIMEOUT_MS`
+
+The tray menu item `AI 闲聊` reads and updates the same config file. The API key is not exposed to the renderer.
+
+## Live2D Models
+
+The model configuration entry point is `LIVE2D_MODEL_CONFIG_PATHS` in `src/live2d-model-catalog.js`. Bundled model files live in:
+
+```text
+assets/live2d/models/nito-runtime/
+```
+
+The bundled `nito-runtime` model set is based on the official Nito sample model from Live2D Creative Studio:
+
+- Source: [にと | WORKS | Live2D Creative Studio](https://www.live2dcs.jp/works/nito/)
+- Creator: Live2D inc.
+
+Each `*.live2d.json` can configure:
+
+- default motion, expression, mood, and hold timing
+- protocol event behavior, such as `request.created`, `assistant.message`, and `tool.started`
+- local runtime state behavior, such as `connected`, `disconnect`, and `error`
+- model layout, runtime resource paths, and interaction metadata
+
+After changing models or motion groups, run:
+
+```bash
+npm run doctor
+npm test
+```
+
+## Directory Structure
+
+```text
+.
+  main.js                         Electron main process, tray menu, and service orchestration
+  preload.js                      Safe bridge for the renderer
+  ui/                             Desktop overlay page
+  src/app/                        App state and local service runtime
+  src/dialogue/                   Avatar bubbles and AI persona dialogue logic
+  src/avatar/                     Avatar state and interrupt policy
+  src/event-mapping/              Protocol event normalization
+  assets/live2d/                  Live2D manifest, adapter, and model resources
+  scripts/                        Packaging prep, resource checks, and SDK import scripts
+  tests/                          Behavior mapping and dialogue logic tests
+```

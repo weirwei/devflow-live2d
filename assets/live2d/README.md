@@ -1,7 +1,16 @@
 # Live2D assets
 
+**Languages:** [English](../../README.md) | [简体中文](../../README.zh-CN.md) | [日本語](../../README.ja.md)
+
 This directory contains the Live2D integration used by the desktop overlay.
 The current app intentionally ships only the `nito-runtime` model set.
+
+## Model source
+
+The bundled `nito-runtime` model set is based on the official Nito sample model from Live2D Creative Studio:
+
+- Source: [にと | WORKS | Live2D Creative Studio](https://www.live2dcs.jp/works/nito/)
+- Creator: Live2D inc.
 
 ## Current layout
 
