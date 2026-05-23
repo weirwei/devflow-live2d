@@ -34,13 +34,13 @@
       "mood": "calm"
     },
     "request.created": {
-      "motion": "Reject",
+      "motion": "Sad",
       "mood": "alert",
       "holdMs": 1600,
       "bubbleTone": "alert"
     },
     "task.updated": {
-      "motion": "Happy",
+      "motion": null,
       "mood": "focus"
     },
     "task.assigned": {
@@ -54,7 +54,7 @@
       "bubbleTone": "success"
     },
     "tool.started": {
-      "motion": "Sad",
+      "motion": null,
       "mood": "focus"
     },
     "tool.completed": {

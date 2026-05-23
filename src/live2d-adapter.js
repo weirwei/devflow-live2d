@@ -38,7 +38,7 @@ registerRuntime("mock", async ({ container }) => {
   return {
     async setAvatarState(avatarState) {
       container.dataset.mood = avatarState.mood;
-      container.dataset.motion = avatarState.motion;
+      container.dataset.motion = avatarState.motion || "";
       renderMockFace(container, avatarState);
     },
     destroy() {},
@@ -62,7 +62,7 @@ registerRuntime("external-official", async ({ container, manifest }) => {
   return {
     async setAvatarState(avatarState) {
       container.dataset.mood = avatarState.mood;
-      container.dataset.motion = avatarState.motion;
+      container.dataset.motion = avatarState.motion || "";
       await delegate.setState(avatarState);
     },
     destroy() {

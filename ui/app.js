@@ -169,10 +169,12 @@ function resolveModelAvatarState(avatarState) {
   return {
     ...avatarState,
     motion:
-      model?.motions?.[avatarState.motion] ||
-      avatarState.motion ||
-      model?.defaults?.motion ||
-      "Idle",
+      avatarState.motion === null
+        ? null
+        : model?.motions?.[avatarState.motion] ||
+          avatarState.motion ||
+          model?.defaults?.motion ||
+          "Idle",
     expression:
       model?.expressions?.[avatarState.expression] ||
       model?.expressions?.[avatarState.mood] ||
@@ -311,7 +313,7 @@ function applyNormalizedEventToAvatar(normalized) {
   appState.avatarState = {
     ...nextAvatarState,
     mood: behavior.mood || nextAvatarState.mood,
-    motion: behavior.motion || nextAvatarState.motion,
+    motion: behavior.motion === null ? null : behavior.motion || nextAvatarState.motion,
     motionIndex: undefined,
     expression:
       typeof behavior.expression === "string"

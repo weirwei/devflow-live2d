@@ -116,14 +116,14 @@ async function createPreviewFallback(container, manifest) {
   return {
     async setState(state) {
       container.dataset.mood = state.mood;
-      container.dataset.motion = state.motion;
+      container.dataset.motion = state.motion || "";
 
       const badge = container.querySelector("[data-avatar-badge]");
       const eyes = container.querySelector("[data-avatar-eyes]");
       const mouth = container.querySelector("[data-avatar-mouth]");
 
       if (badge) {
-        badge.textContent = `${manifest.model.name}: ${state.motion}`;
+        badge.textContent = `${manifest.model.name}: ${state.motion || "no-motion"}`;
       }
 
       if (eyes) eyes.textContent = "";

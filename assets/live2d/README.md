@@ -62,6 +62,10 @@ Each Live2D model variant has its own editable config file. The `events` map is 
       "mood": "happy",
       "holdMs": 1600,
       "bubbleTone": "success"
+    },
+    "tool.started": {
+      "motion": null,
+      "mood": "focus"
     }
   },
   "runtimeEvents": {
@@ -80,6 +84,10 @@ Each Live2D model variant has its own editable config file. The `events` map is 
 ```
 
 Supported protocol event keys are listed in `PROTOCOL_EVENT_TYPES`; local runtime event keys are listed in `RUNTIME_EVENT_TYPES`.
+
+Set `"motion": null` when an event should update mood, expression, bubble text, and hold timing
+without starting or restarting a Live2D motion. This is useful for high-frequency events such as
+`tool.started` or `task.updated`, where repeatedly replaying motions can make the model jittery.
 
 ## Motion groups and preview
 

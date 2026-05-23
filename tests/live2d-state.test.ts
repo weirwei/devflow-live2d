@@ -3,7 +3,11 @@ import {
   createInitialAvatarState,
   reduceNormalizedEvent,
 } from "../src/avatar/avatarState.js";
-import { getLive2DModelById } from "../src/live2d-model-catalog.js";
+import {
+  getLive2DModelById,
+  normalizeLive2DModelConfig,
+  resolveModelEventBehavior,
+} from "../src/live2d-model-catalog.js";
 import { splitAssistantMessage } from "../src/bubble-text.js";
 import { normalizeProtocolEvent } from "../src/event-mapping/normalizeEvent.js";
 import { deriveStatusBubble } from "../src/status-bubble.js";
@@ -131,6 +135,25 @@ describe("model behavior preview mapping", () => {
     expect(nico.manifestModel.basePath).toBe("assets/live2d/models/nito-runtime");
     expect(nico.defaults.motion).toBe("Relaxed");
     expect(nico.motions.celebrate).toBe("Happy");
+  });
+
+  it("preserves null motion as an explicit no-motion event behavior", () => {
+    const model = normalizeLive2DModelConfig({
+      id: "quiet-model",
+      events: {
+        "tool.started": {
+          motion: null,
+          mood: "focus",
+          expression: "Attentive",
+        },
+      },
+    });
+
+    const behavior = resolveModelEventBehavior(model, "tool.started");
+    expect(behavior.motion).toBeNull();
+    expect(behavior.mood).toBe("focus");
+    expect(behavior.expression).toBe("Attentive");
+    expect(model.motions.workLoop).toBeUndefined();
   });
 });
 

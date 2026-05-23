@@ -55,14 +55,19 @@ function cleanNumber(value, fallback) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function hasOwn(value, key) {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
 function toRuntimeResourcesRoot(basePath) {
   return basePath.replace(/^assets\/live2d\/models\//, "");
 }
 
 function normalizeBehavior(input = {}, fallback = DEFAULT_EVENT_BEHAVIOR) {
   const next = asObject(input);
+  const motionDisabled = hasOwn(next, "motion") && next.motion === null;
   return {
-    motion: cleanString(next.motion, fallback.motion),
+    motion: motionDisabled ? null : cleanString(next.motion, fallback.motion),
     expression: typeof next.expression === "string" ? next.expression.trim() : fallback.expression,
     mood: cleanString(next.mood, fallback.mood),
     holdMs: Math.max(0, cleanNumber(next.holdMs, fallback.holdMs || 0)),
