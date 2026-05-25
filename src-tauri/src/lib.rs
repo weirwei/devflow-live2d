@@ -10,6 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::{
+    image::Image,
     menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, SubmenuBuilder},
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Monitor, WebviewUrl, WebviewWindow,
@@ -21,10 +22,13 @@ use tauri_plugin_global_shortcut::{Code, Modifiers, ShortcutState};
 use objc2::{
     ffi,
     runtime::{AnyClass, AnyObject, Imp, Sel},
-    sel,
+    sel, MainThreadMarker,
 };
 #[cfg(target_os = "macos")]
-use objc2_app_kit::{NSScreenSaverWindowLevel, NSWindow, NSWindowCollectionBehavior};
+use objc2_app_kit::{
+    NSApplication, NSApplicationActivationPolicy, NSScreenSaverWindowLevel, NSWindow,
+    NSWindowCollectionBehavior,
+};
 #[cfg(target_os = "macos")]
 use objc2_foundation::NSRect;
 
@@ -35,6 +39,8 @@ const DEFAULT_PROTOCOL_BASE_URL: &str = "http://127.0.0.1:4317";
 const SETTINGS_FILE_NAME: &str = "devflow-live2d-settings.json";
 const DEVFLOW_CONFIG_FILE: &str = ".devflow/live2d/config.json";
 const WINDOW_VISIBLE_MARGIN: f64 = 80.0;
+const MACOS_OVERLAY_REINFORCE_INTERVAL: Duration = Duration::from_millis(1200);
+const TRAY_TEMPLATE_ICON_BYTES: &[u8] = include_bytes!("../../assets/app/trayTemplate.png");
 
 #[cfg(target_os = "macos")]
 static OVERLAY_WINDOW_PATCHED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
@@ -643,8 +649,38 @@ fn apply_window_state(app: &AppHandle, state: &Value) {
     );
 }
 
+fn tray_template_icon(app: &AppHandle) -> Image<'static> {
+    Image::from_bytes(TRAY_TEMPLATE_ICON_BYTES).unwrap_or_else(|_| {
+        app.default_window_icon()
+            .expect("default window icon should be available")
+            .clone()
+            .to_owned()
+    })
+}
+
 #[cfg(target_os = "macos")]
 fn apply_macos_overlay_window_level(window: &WebviewWindow) {
+    apply_macos_overlay_app_policy();
+    apply_macos_overlay_window_level_inner(window, false);
+}
+
+#[cfg(target_os = "macos")]
+fn reinforce_macos_overlay_window_level(window: &WebviewWindow) {
+    apply_macos_overlay_app_policy();
+    apply_macos_overlay_window_level_inner(window, true);
+}
+
+#[cfg(target_os = "macos")]
+fn apply_macos_overlay_app_policy() {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    let _ = app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+}
+
+#[cfg(target_os = "macos")]
+fn apply_macos_overlay_window_level_inner(window: &WebviewWindow, order_front: bool) {
     let Ok(ns_window_ptr) = window.ns_window() else {
         return;
     };
@@ -654,10 +690,18 @@ fn apply_macos_overlay_window_level(window: &WebviewWindow) {
     let ns_window = unsafe { &*(ns_window_ptr.cast::<NSWindow>()) };
     install_unconstrained_window_constraint(ns_window);
     ns_window.setLevel(NSScreenSaverWindowLevel);
-    let behavior = NSWindowCollectionBehavior::CanJoinAllSpaces
+    let behavior = NSWindowCollectionBehavior::CanJoinAllApplications
+        | NSWindowCollectionBehavior::CanJoinAllSpaces
         | NSWindowCollectionBehavior::FullScreenAuxiliary
-        | NSWindowCollectionBehavior::Stationary;
+        | NSWindowCollectionBehavior::Transient
+        | NSWindowCollectionBehavior::IgnoresCycle
+        | NSWindowCollectionBehavior::FullScreenDisallowsTiling;
     ns_window.setCollectionBehavior(behavior);
+    ns_window.setCanHide(false);
+    ns_window.setHidesOnDeactivate(false);
+    if order_front {
+        ns_window.orderFrontRegardless();
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -699,6 +743,9 @@ fn install_unconstrained_window_constraint(ns_window: &NSWindow) {
 
 #[cfg(not(target_os = "macos"))]
 fn apply_macos_overlay_window_level(_window: &WebviewWindow) {}
+
+#[cfg(not(target_os = "macos"))]
+fn reinforce_macos_overlay_window_level(_window: &WebviewWindow) {}
 
 fn persist_state(app: &AppHandle, backend: &AppBackend) -> Result<(), String> {
     write_json(&settings_path(app)?, &backend.state)?;
@@ -2018,9 +2065,10 @@ pub fn run() {
                     apply_window_state(&handle, &backend.state);
                     let menu = build_menu(&handle, &backend)?;
                     drop(backend);
+                    let tray_icon = tray_template_icon(&handle);
                     let tray = TrayIconBuilder::new()
                         .tooltip("DPartner")
-                        .icon(app.default_window_icon().unwrap().clone())
+                        .icon(tray_icon)
                         .menu(&menu)
                         .on_menu_event(|app, event| handle_menu(app, event.id().as_ref()))
                         .on_tray_icon_event(|tray, event| {
@@ -2097,6 +2145,38 @@ pub fn run() {
                             update_tray_menu(&app_for_watchdog);
                         }
                     }
+                }
+            });
+            let app_for_overlay_reinforce = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio_sleep(MACOS_OVERLAY_REINFORCE_INTERVAL).await;
+                    let app_for_main_thread = app_for_overlay_reinforce.clone();
+                    let _ = app_for_overlay_reinforce.run_on_main_thread(move || {
+                        let should_reinforce = app_for_main_thread
+                            .try_state::<BackendState>()
+                            .and_then(|state| {
+                                state.lock().ok().map(|backend| {
+                                    !backend
+                                        .state
+                                        .get("hidden")
+                                        .and_then(Value::as_bool)
+                                        .unwrap_or(false)
+                                        && backend
+                                            .state
+                                            .get("alwaysOnTop")
+                                            .and_then(Value::as_bool)
+                                            .unwrap_or(true)
+                                })
+                            })
+                            .unwrap_or(false);
+                        if should_reinforce {
+                            if let Some(window) = app_for_main_thread.get_webview_window(WINDOW_LABEL)
+                            {
+                                reinforce_macos_overlay_window_level(&window);
+                            }
+                        }
+                    });
                 }
             });
 
