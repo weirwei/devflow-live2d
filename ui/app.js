@@ -268,8 +268,8 @@ function updateBubbleLayout() {
   const avatarRect = elements.avatarShell.getBoundingClientRect();
   const bubbleRect = elements.bubble.getBoundingClientRect();
   const viewportPadding = 14;
-  const bubbleGap = -6;
-  const visualAnchorRatio = appState.runtime.id === "mock" ? 0.2 : 0.42;
+  const bubbleGap = appState.runtime.id === "mock" ? -6 : 10;
+  const visualAnchorRatio = appState.runtime.id === "mock" ? 0.2 : 0.55;
   const minTop = viewportPadding;
   const maxTop = Math.max(
     minTop,
