@@ -12,9 +12,21 @@ use std::{
 use tauri::{
     menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, SubmenuBuilder},
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Wry,
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Monitor, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder, Window, Wry,
 };
 use tauri_plugin_global_shortcut::{Code, Modifiers, ShortcutState};
+
+#[cfg(target_os = "macos")]
+use objc2::{
+    ffi,
+    runtime::{AnyClass, AnyObject, Imp, Sel},
+    sel,
+};
+#[cfg(target_os = "macos")]
+use objc2_app_kit::{NSScreenSaverWindowLevel, NSWindow, NSWindowCollectionBehavior};
+#[cfg(target_os = "macos")]
+use objc2_foundation::NSRect;
 
 const WINDOW_LABEL: &str = "main";
 const STATE_EVENT: &str = "overlay-state";
@@ -22,6 +34,10 @@ const PREVIEW_EVENT: &str = "overlay:previewAvatarState";
 const DEFAULT_PROTOCOL_BASE_URL: &str = "http://127.0.0.1:4317";
 const SETTINGS_FILE_NAME: &str = "devflow-live2d-settings.json";
 const DEVFLOW_CONFIG_FILE: &str = ".devflow/live2d/config.json";
+const WINDOW_VISIBLE_MARGIN: f64 = 80.0;
+
+#[cfg(target_os = "macos")]
+static OVERLAY_WINDOW_PATCHED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ModelInfo {
@@ -46,6 +62,24 @@ struct RuntimeStatus {
     has_python3: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct ContentSize {
+    width: f64,
+    height: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct WindowPosition {
+    x: f64,
+    y: f64,
+    #[serde(default = "default_true")]
+    persist: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 struct ManagedChild {
     child: Child,
 }
@@ -58,6 +92,7 @@ struct AppBackend {
     codex_bridge: Option<ManagedChild>,
     protocol_last_error: String,
     codex_bridge_last_error: String,
+    suppress_window_move_persistence: bool,
 }
 
 type BackendState = Mutex<AppBackend>;
@@ -94,7 +129,7 @@ fn default_state() -> Value {
             "model": "",
             "timeoutMs": 8000
         },
-        "windowBounds": { "x": 0, "y": 0, "width": 420, "height": 720 }
+        "windowBounds": { "x": 0, "y": 60, "width": 420, "height": 444 }
     })
 }
 
@@ -151,7 +186,139 @@ fn normalize_state(mut state: Value, models: &[ModelInfo]) -> Value {
         state["protocolBaseUrl"] = Value::String(DEFAULT_PROTOCOL_BASE_URL.to_string());
     }
 
+    let bounds = state
+        .get("windowBounds")
+        .cloned()
+        .unwrap_or(default["windowBounds"].clone());
+    state["windowBounds"] = normalize_window_bounds(&bounds);
+
     state
+}
+
+fn normalize_window_bounds(bounds: &Value) -> Value {
+    normalize_window_bounds_inner(bounds, true)
+}
+
+fn normalize_live_window_bounds(bounds: &Value) -> Value {
+    normalize_window_bounds_inner(bounds, false)
+}
+
+fn normalize_window_bounds_inner(bounds: &Value, migrate_legacy_physical_size: bool) -> Value {
+    let mut x = bounds.get("x").and_then(Value::as_f64).unwrap_or(0.0);
+    let mut y = bounds.get("y").and_then(Value::as_f64).unwrap_or(60.0);
+    let mut width = bounds.get("width").and_then(Value::as_f64).unwrap_or(420.0);
+    let mut height = bounds
+        .get("height")
+        .and_then(Value::as_f64)
+        .unwrap_or(720.0);
+
+    if migrate_legacy_physical_size && (width > 620.0 || height > 900.0) {
+        x /= 2.0;
+        y /= 2.0;
+        width /= 2.0;
+        height /= 2.0;
+    }
+
+    json!({
+        "x": x.clamp(-520.0, 10000.0).round(),
+        "y": y.clamp(-520.0, 10000.0).round(),
+        "width": width.clamp(320.0, 520.0).round(),
+        "height": height.clamp(360.0, 920.0).round()
+    })
+}
+
+fn constrain_bounds_to_visible_area(bounds: &Value, monitors: &[Monitor]) -> Value {
+    constrain_bounds_to_visible_area_inner(bounds, monitors, true)
+}
+
+fn constrain_live_bounds_to_visible_area(bounds: &Value, monitors: &[Monitor]) -> Value {
+    constrain_bounds_to_visible_area_inner(bounds, monitors, false)
+}
+
+fn constrain_bounds_to_visible_area_inner(
+    bounds: &Value,
+    monitors: &[Monitor],
+    migrate_legacy_physical_size: bool,
+) -> Value {
+    let normalized = normalize_window_bounds_inner(bounds, migrate_legacy_physical_size);
+    if monitors.is_empty() {
+        return normalized;
+    }
+
+    let mut min_x = f64::INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+
+    for monitor in monitors {
+        let scale_factor = monitor.scale_factor();
+        let work_area = monitor.work_area();
+        let x = work_area.position.x as f64 / scale_factor;
+        let y = work_area.position.y as f64 / scale_factor;
+        let width = work_area.size.width as f64 / scale_factor;
+        let height = work_area.size.height as f64 / scale_factor;
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x + width);
+        max_y = max_y.max(y + height);
+    }
+
+    if !min_x.is_finite() || !min_y.is_finite() || !max_x.is_finite() || !max_y.is_finite() {
+        return normalized;
+    }
+
+    let width = normalized
+        .get("width")
+        .and_then(Value::as_f64)
+        .unwrap_or(420.0);
+    let height = normalized
+        .get("height")
+        .and_then(Value::as_f64)
+        .unwrap_or(444.0);
+    let x = normalized
+        .get("x")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0)
+        .clamp(
+            min_x - width + WINDOW_VISIBLE_MARGIN,
+            max_x - WINDOW_VISIBLE_MARGIN,
+        );
+    let y = normalized
+        .get("y")
+        .and_then(Value::as_f64)
+        .unwrap_or(60.0)
+        .clamp(
+            min_y - height + WINDOW_VISIBLE_MARGIN,
+            max_y - WINDOW_VISIBLE_MARGIN,
+        );
+
+    json!({
+        "x": x.round(),
+        "y": y.round(),
+        "width": width,
+        "height": height
+    })
+}
+
+fn normalize_live_window_bounds_for_window(window: &WebviewWindow, bounds: &Value) -> Value {
+    match window.available_monitors() {
+        Ok(monitors) => constrain_live_bounds_to_visible_area(bounds, &monitors),
+        Err(_) => normalize_live_window_bounds(bounds),
+    }
+}
+
+fn normalize_window_bounds_for_tauri_window(window: &Window<Wry>, bounds: &Value) -> Value {
+    match window.available_monitors() {
+        Ok(monitors) => constrain_bounds_to_visible_area(bounds, &monitors),
+        Err(_) => normalize_window_bounds(bounds),
+    }
+}
+
+fn normalize_window_bounds_for_app(app: &AppHandle, bounds: &Value) -> Value {
+    match app.available_monitors() {
+        Ok(monitors) => constrain_bounds_to_visible_area(bounds, &monitors),
+        Err(_) => normalize_window_bounds(bounds),
+    }
 }
 
 fn read_json(path: &Path) -> Option<Value> {
@@ -466,6 +633,7 @@ fn apply_window_state(app: &AppHandle, state: &Value) {
             .and_then(Value::as_bool)
             .unwrap_or(true),
     );
+    apply_macos_overlay_window_level(&window);
     let _ = window.set_skip_taskbar(true);
     let _ = window.set_ignore_cursor_events(
         state
@@ -474,6 +642,63 @@ fn apply_window_state(app: &AppHandle, state: &Value) {
             .unwrap_or(false),
     );
 }
+
+#[cfg(target_os = "macos")]
+fn apply_macos_overlay_window_level(window: &WebviewWindow) {
+    let Ok(ns_window_ptr) = window.ns_window() else {
+        return;
+    };
+    if ns_window_ptr.is_null() {
+        return;
+    }
+    let ns_window = unsafe { &*(ns_window_ptr.cast::<NSWindow>()) };
+    install_unconstrained_window_constraint(ns_window);
+    ns_window.setLevel(NSScreenSaverWindowLevel);
+    let behavior = NSWindowCollectionBehavior::CanJoinAllSpaces
+        | NSWindowCollectionBehavior::FullScreenAuxiliary
+        | NSWindowCollectionBehavior::Stationary;
+    ns_window.setCollectionBehavior(behavior);
+}
+
+#[cfg(target_os = "macos")]
+fn install_unconstrained_window_constraint(ns_window: &NSWindow) {
+    let object: &AnyObject = ns_window.as_ref();
+    let window_class = object.class();
+    OVERLAY_WINDOW_PATCHED.get_or_init(|| {
+        unsafe extern "C-unwind" fn constrain_frame_rect_to_screen(
+            _this: *mut AnyObject,
+            _cmd: Sel,
+            frame: NSRect,
+            _screen: *mut AnyObject,
+        ) -> NSRect {
+            frame
+        }
+
+        let method_types = c"{CGRect={CGPoint=dd}{CGSize=dd}}@:{CGRect={CGPoint=dd}{CGSize=dd}}@";
+        let implementation: Imp = unsafe {
+            std::mem::transmute(
+                constrain_frame_rect_to_screen
+                    as unsafe extern "C-unwind" fn(
+                        *mut AnyObject,
+                        Sel,
+                        NSRect,
+                        *mut AnyObject,
+                    ) -> NSRect,
+            )
+        };
+        let _ = unsafe {
+            ffi::class_addMethod(
+                window_class as *const AnyClass as *mut AnyClass,
+                sel!(constrainFrameRect:toScreen:),
+                implementation,
+                method_types.as_ptr(),
+            )
+        };
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn apply_macos_overlay_window_level(_window: &WebviewWindow) {}
 
 fn persist_state(app: &AppHandle, backend: &AppBackend) -> Result<(), String> {
     write_json(&settings_path(app)?, &backend.state)?;
@@ -1298,6 +1523,129 @@ fn open_overlay_menu(app: AppHandle) -> Result<Value, String> {
     Ok(public_state(&app, &backend))
 }
 
+fn current_window_frame(window: &WebviewWindow) -> Result<Value, String> {
+    let scale_factor = window.scale_factor().unwrap_or(1.0);
+    let position = window
+        .outer_position()
+        .map_err(|error| error.to_string())?
+        .to_logical::<f64>(scale_factor);
+    let size = window
+        .inner_size()
+        .map_err(|error| error.to_string())?
+        .to_logical::<f64>(scale_factor);
+    Ok(json!({
+        "x": position.x,
+        "y": position.y,
+        "width": size.width,
+        "height": size.height
+    }))
+}
+
+#[tauri::command]
+fn get_window_frame(app: AppHandle) -> Result<Value, String> {
+    let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
+        return Err("main window unavailable".to_string());
+    };
+    current_window_frame(&window)
+}
+
+#[tauri::command]
+fn set_window_position(
+    app: AppHandle,
+    backend: tauri::State<BackendState>,
+    position: WindowPosition,
+) -> Result<(), String> {
+    let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
+        return Err("main window unavailable".to_string());
+    };
+    if !position.persist {
+        {
+            let mut backend = backend
+                .lock()
+                .map_err(|_| "backend lock poisoned".to_string())?;
+            backend.suppress_window_move_persistence = true;
+        }
+        if let Err(error) = window.set_position(LogicalPosition::new(position.x, position.y)) {
+            if let Some(state) = app.try_state::<BackendState>() {
+                if let Ok(mut backend) = state.lock() {
+                    backend.suppress_window_move_persistence = false;
+                }
+            }
+            return Err(error.to_string());
+        }
+        return Ok(());
+    }
+
+    window
+        .set_position(LogicalPosition::new(position.x, position.y))
+        .map_err(|error| error.to_string())?;
+
+    let frame = current_window_frame(&window)?;
+    let next_bounds = normalize_live_window_bounds_for_window(
+        &window,
+        &json!({
+            "x": position.x,
+            "y": position.y,
+            "width": frame.get("width").and_then(Value::as_f64).unwrap_or(420.0),
+            "height": frame.get("height").and_then(Value::as_f64).unwrap_or(396.0)
+        }),
+    );
+    let mut backend = backend
+        .lock()
+        .map_err(|_| "backend lock poisoned".to_string())?;
+    backend.suppress_window_move_persistence = false;
+    backend.state["windowBounds"] = next_bounds;
+    persist_state(&app, &backend)
+}
+
+#[tauri::command]
+fn sync_window_content_size(
+    app: AppHandle,
+    backend: tauri::State<BackendState>,
+    size: ContentSize,
+) -> Result<(), String> {
+    let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
+        return Err("main window unavailable".to_string());
+    };
+    let scale_factor = window.scale_factor().unwrap_or(1.0);
+    let old_position = window
+        .outer_position()
+        .map_err(|error| error.to_string())?
+        .to_logical::<f64>(scale_factor);
+    let old_size = window
+        .inner_size()
+        .map_err(|error| error.to_string())?
+        .to_logical::<f64>(scale_factor);
+    let next_bounds = normalize_live_window_bounds_for_window(
+        &window,
+        &json!({
+            "x": old_position.x,
+            "y": old_position.y,
+            "width": size.width,
+            "height": size.height
+        }),
+    );
+    let width = next_bounds
+        .get("width")
+        .and_then(Value::as_f64)
+        .unwrap_or(420.0);
+    let height = next_bounds
+        .get("height")
+        .and_then(Value::as_f64)
+        .unwrap_or(584.0);
+    if (old_size.width - width).abs() >= 2.0 || (old_size.height - height).abs() >= 2.0 {
+        window
+            .set_size(LogicalSize::new(width, height))
+            .map_err(|error| error.to_string())?;
+    }
+
+    let mut backend = backend
+        .lock()
+        .map_err(|_| "backend lock poisoned".to_string())?;
+    backend.state["windowBounds"] = next_bounds;
+    persist_state(&app, &backend)
+}
+
 #[tauri::command]
 fn read_text_file(relative_path: String) -> Result<String, String> {
     let relative = Path::new(&relative_path);
@@ -1580,11 +1928,13 @@ fn load_initial_backend(app: &AppHandle) -> AppBackend {
         codex_bridge: None,
         protocol_last_error: String::new(),
         codex_bridge_last_error: String::new(),
+        suppress_window_move_persistence: false,
     }
 }
 
 fn create_window(app: &AppHandle, state: &Value) -> tauri::Result<WebviewWindow> {
-    let bounds = state.get("windowBounds").unwrap_or(&Value::Null);
+    let bounds =
+        normalize_window_bounds_for_app(app, state.get("windowBounds").unwrap_or(&Value::Null));
     WebviewWindowBuilder::new(app, WINDOW_LABEL, WebviewUrl::default())
         .title("DPartner")
         .inner_size(
@@ -1648,6 +1998,9 @@ pub fn run() {
             update_overlay_state,
             open_overlay_menu,
             quit_app,
+            get_window_frame,
+            set_window_position,
+            sync_window_content_size,
             read_text_file,
             generate_persona_dialogue
         ])
@@ -1658,6 +2011,7 @@ pub fn run() {
             app.manage(Mutex::new(backend));
 
             let window = create_window(&handle, &initial_window_state)?;
+            apply_macos_overlay_window_level(&window);
             {
                 let state = app.state::<BackendState>();
                 if let Ok(backend) = state.lock() {
@@ -1749,24 +2103,43 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Moved(_)) {
+                if let Some(state) = window.app_handle().try_state::<BackendState>() {
+                    if let Ok(backend) = state.lock() {
+                        if backend.suppress_window_move_persistence {
+                            return;
+                        }
+                    }
+                }
+            }
             if matches!(
                 event,
                 tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_)
             ) {
-                let position = window.outer_position().ok();
-                let size = window.inner_size().ok();
+                let scale_factor = window.scale_factor().unwrap_or(1.0);
+                let position = window
+                    .outer_position()
+                    .ok()
+                    .map(|position| position.to_logical::<f64>(scale_factor));
+                let size = window
+                    .inner_size()
+                    .ok()
+                    .map(|size| size.to_logical::<f64>(scale_factor));
                 if let (Some(position), Some(size), Some(state)) = (
                     position,
                     size,
                     window.app_handle().try_state::<BackendState>(),
                 ) {
                     if let Ok(mut backend) = state.lock() {
-                        backend.state["windowBounds"] = json!({
-                            "x": position.x,
-                            "y": position.y,
-                            "width": size.width,
-                            "height": size.height
-                        });
+                        backend.state["windowBounds"] = normalize_window_bounds_for_tauri_window(
+                            window,
+                            &json!({
+                                "x": position.x,
+                                "y": position.y,
+                                "width": size.width,
+                                "height": size.height
+                            }),
+                        );
                         let _ = persist_state(window.app_handle(), &backend);
                     }
                 }

@@ -14,14 +14,14 @@ async function readJson(relativePath) {
 
 async function fileExists(relativePath) {
   try {
-    if (window.desktopAPI?.readTextFile) {
-      await window.desktopAPI.readTextFile(relativePath);
-    } else {
-      const response = await fetch(`../${relativePath}`, { method: "HEAD" });
-      if (!response.ok) {
-        return false;
-      }
+    const response = await fetch(toAppAssetUrl(relativePath), { method: "HEAD" });
+    if (response.ok) {
+      return true;
     }
+    if (!window.desktopAPI?.readTextFile) {
+      return false;
+    }
+    await window.desktopAPI.readTextFile(relativePath);
     return true;
   } catch {
     return false;
@@ -29,15 +29,11 @@ async function fileExists(relativePath) {
 }
 
 function toUiAssetPath(appRelativePath) {
-  return `../${appRelativePath}`;
+  return toAppAssetUrl(appRelativePath);
 }
 
-function toAppRootUrl() {
-  return new URL("../../../", import.meta.url);
-}
-
-function toRuntimeModuleUrl(appRelativePath) {
-  return new URL(appRelativePath, toAppRootUrl()).href;
+function toAppAssetUrl(appRelativePath) {
+  return new URL(appRelativePath, document.baseURI).href;
 }
 
 function ensureScriptLoaded(src) {
@@ -146,13 +142,13 @@ async function createOfficialAdapter({ container, manifest }) {
 
   const root = ensureRuntimeRoot(container);
   root.replaceChildren();
-  const baseUrl = toRuntimeModuleUrl("official-demo-runtime/dist/");
+  const baseUrl = toAppAssetUrl("official-demo-runtime/dist/");
   const modelLayout = {
     runtimeWidth: manifest.model?.runtimeWidth,
     centerX: manifest.model?.centerX,
     centerY: manifest.model?.centerY,
   };
-  const resourcesBaseUrl = toRuntimeModuleUrl("assets/live2d/models/");
+  const resourcesBaseUrl = toAppAssetUrl("assets/live2d/models/");
   const resourcesRoot = String(manifest.model.basePath || "")
     .replace(/^assets\/live2d\/models\//, "")
     .replace(/\/+$/, "");
@@ -169,8 +165,8 @@ async function createOfficialAdapter({ container, manifest }) {
   window.BackstageLive2DModelLayout = modelLayout;
   window.DevflowLive2DModelConfig = modelConfig;
   window.BackstageLive2DModelConfig = modelConfig;
-  await ensureScriptLoaded(toRuntimeModuleUrl("official-demo-runtime/dist/Core/live2dcubismcore.js"));
-  await ensureScriptLoaded(toRuntimeModuleUrl(runtimeModulePath));
+  await ensureScriptLoaded(toAppAssetUrl("official-demo-runtime/dist/Core/live2dcubismcore.js"));
+  await ensureScriptLoaded(toAppAssetUrl(runtimeModulePath));
 
   const runtimeApi = window.DevflowEmbeddedLive2D || window.BackstageEmbeddedLive2D;
   if (!runtimeApi || typeof runtimeApi.initialize !== "function") {

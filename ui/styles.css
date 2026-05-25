@@ -16,6 +16,8 @@
   --avatar-tilt-x: 0deg;
   --avatar-tilt-y: 0deg;
   --bubble-top: 14px;
+  --avatar-fit-height: 620px;
+  --shell-fit-height: 720px;
 }
 
 * {
@@ -37,7 +39,7 @@ body {
 
 body {
   display: flex;
-  align-items: flex-end;
+  align-items: flex-start;
   justify-content: center;
   padding: 12px;
   -webkit-app-region: no-drag;
@@ -87,7 +89,7 @@ input[type="range"]::-webkit-slider-thumb {
 .shell {
   position: relative;
   width: min(100%, 520px);
-  height: min(100%, 560px);
+  height: min(100%, var(--shell-fit-height));
   padding: 0;
   display: block;
   pointer-events: none;
@@ -337,7 +339,7 @@ input[type="range"]::-webkit-slider-thumb {
 
 .shell--panel-hidden .avatar-shell--live2d {
   width: min(100%, 480px);
-  height: min(100%, 520px);
+  height: min(100%, var(--avatar-fit-height));
   max-height: 100%;
 }
 
