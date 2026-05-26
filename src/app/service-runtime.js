@@ -70,6 +70,8 @@ export class DesktopServiceRuntime {
       protocol: "",
       codexBridge: "",
     };
+    this.hostCapabilities = this.getHostCapabilities();
+    this.claudePluginInstalled = this.isClaudeGlobalPluginInstalled();
   }
 
   getBundleRoot() {
@@ -157,7 +159,7 @@ export class DesktopServiceRuntime {
   }
 
   getStatus() {
-    const capabilities = this.getHostCapabilities();
+    const capabilities = this.hostCapabilities;
     return {
       protocol: {
         running: Boolean(this.processes.protocol),
@@ -172,7 +174,7 @@ export class DesktopServiceRuntime {
         lastError: this.lastErrors.codexBridge || "",
       },
       claudePlugin: {
-        installed: this.isClaudeGlobalPluginInstalled(),
+        installed: this.claudePluginInstalled,
         installRoot: this.getClaudePluginInstallRoot(),
         settingsPath: this.getClaudeSettingsPath(),
       },
@@ -331,7 +333,7 @@ export class DesktopServiceRuntime {
       this.verifySourceExists(bridgeScript, "Codex bridge script");
       this.ensurePathsForRuntime();
 
-      const pythonBinary = this.resolveCommandBinary("python3");
+      const pythonBinary = this.hostCapabilities.python3;
       if (!pythonBinary) {
         throw new Error("Codex bridge requires python3");
       }
@@ -543,7 +545,7 @@ export class DesktopServiceRuntime {
   }
 
   validatePluginInstallDependencies() {
-    const capabilities = this.getHostCapabilities();
+    const capabilities = this.hostCapabilities;
     const missing = [];
     if (!capabilities.bash) missing.push("bash");
     if (!capabilities.node) missing.push("node");
@@ -556,6 +558,7 @@ export class DesktopServiceRuntime {
     this.validatePluginInstallDependencies();
     this.copyClaudePluginFiles();
     this.updateClaudeSettingsForInstall();
+    this.claudePluginInstalled = true;
     return {
       pluginRoot: this.getClaudePluginInstallRoot(),
       settingsPath: this.getClaudeSettingsPath(),
@@ -565,6 +568,7 @@ export class DesktopServiceRuntime {
   async uninstallClaudeGlobalPlugin() {
     this.updateClaudeSettingsForUninstall();
     removeIfExists(this.getClaudePluginInstallRoot());
+    this.claudePluginInstalled = false;
     return {
       pluginRoot: this.getClaudePluginInstallRoot(),
       settingsPath: this.getClaudeSettingsPath(),

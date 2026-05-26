@@ -203,7 +203,8 @@ function scheduleWindowContentSizeSync() {
     const bubbleRect = elements.bubble.getBoundingClientRect();
     const bubbleVisible = elements.bubble.classList.contains("bubble--visible");
     const usingLive2D = appState.runtime.id !== "mock";
-    const tuningScale = (Number(appState.avatarTuning.scale) || 100) / 100;
+    const rawTuningScale = Number(appState.avatarTuning.scale);
+    const tuningScale = Number.isFinite(rawTuningScale) ? rawTuningScale / 100 : 1;
     const avatarHeight = usingLive2D
       ? clampNumber(
           LIVE2D_BASE_AVATAR_HEIGHT * tuningScale,
@@ -237,7 +238,9 @@ function scheduleWindowContentSizeSync() {
 function applyAvatarTransformVariables() {
   const root = document.documentElement;
   const usingLive2D = appState.runtime.id !== "mock";
-  const visualScale = usingLive2D ? 1 : appState.avatarTuning.scale / 100;
+  const rawScale = Number(appState.avatarTuning.scale);
+  const tuningScale = Number.isFinite(rawScale) ? rawScale / 100 : 1;
+  const visualScale = usingLive2D ? 1 : tuningScale;
 
   root.style.setProperty("--avatar-scale", String(visualScale));
   root.style.setProperty("--avatar-offset-x", `${appState.avatarTuning.offsetX}px`);
@@ -252,7 +255,8 @@ function applyLive2DLayoutTuning() {
   const baseLayout = appState.runtime.layoutBase || {};
   const baseRuntimeWidth = Number(baseLayout.runtimeWidth) || 1.1;
   const manifestScale = Number(baseLayout.scale) || 1;
-  const tuningScale = (Number(appState.avatarTuning.scale) || 100) / 100;
+  const rawScale = Number(appState.avatarTuning.scale);
+  const tuningScale = Number.isFinite(rawScale) ? rawScale / 100 : 1;
   const nextLayout = {
     runtimeWidth: baseRuntimeWidth * manifestScale * tuningScale,
     centerX: Number(baseLayout.centerX) || 0.45,

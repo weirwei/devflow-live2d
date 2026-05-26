@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     fs,
-    net::{SocketAddr, TcpStream},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -41,6 +40,7 @@ const DEVFLOW_CONFIG_FILE: &str = ".devflow/live2d/config.json";
 const WINDOW_VISIBLE_MARGIN: f64 = 80.0;
 const MACOS_OVERLAY_REINFORCE_INTERVAL: Duration = Duration::from_millis(1200);
 const TRAY_TEMPLATE_ICON_BYTES: &[u8] = include_bytes!("../../assets/app/trayTemplate.png");
+const SCALE_PRESETS: [f64; 3] = [100.0, 80.0, 50.0];
 
 #[cfg(target_os = "macos")]
 static OVERLAY_WINDOW_PATCHED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
@@ -63,6 +63,7 @@ struct RuntimeStatus {
     codex_bridge_log_path: String,
     codex_bridge_last_error: String,
     claude_plugin_installed: bool,
+    claude_plugin_last_error: String,
     has_bash: bool,
     has_node: bool,
     has_python3: bool,
@@ -98,10 +99,26 @@ struct AppBackend {
     codex_bridge: Option<ManagedChild>,
     protocol_last_error: String,
     codex_bridge_last_error: String,
+    claude_plugin_installed: bool,
+    claude_plugin_last_error: String,
+    has_bash: bool,
+    has_node: bool,
+    has_python3: bool,
     suppress_window_move_persistence: bool,
 }
 
 type BackendState = Mutex<AppBackend>;
+
+#[derive(Clone)]
+struct MenuSnapshot {
+    state: Value,
+    models: Vec<ModelInfo>,
+    codex_bridge_running: bool,
+    claude_plugin_installed: bool,
+    has_bash: bool,
+    has_node: bool,
+    has_python3: bool,
+}
 
 fn home_dir() -> PathBuf {
     std::env::var_os("HOME")
@@ -143,6 +160,19 @@ fn clamp_number(value: Option<f64>, fallback: f64, min: f64, max: f64) -> f64 {
     value.unwrap_or(fallback).clamp(min, max)
 }
 
+fn normalize_scale_preset(value: Option<f64>) -> f64 {
+    let target = value.unwrap_or(100.0);
+    SCALE_PRESETS
+        .into_iter()
+        .min_by(|left, right| {
+            (left - target)
+                .abs()
+                .partial_cmp(&(right - target).abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .unwrap_or(100.0)
+}
+
 fn merge_value(base: &mut Value, patch: &Value) {
     match (base, patch) {
         (Value::Object(base_map), Value::Object(patch_map)) => {
@@ -177,7 +207,7 @@ fn normalize_state(mut state: Value, models: &[ModelInfo]) -> Value {
         .cloned()
         .unwrap_or(default["avatarTuning"].clone());
     state["avatarTuning"] = json!({
-        "scale": clamp_number(tuning.get("scale").and_then(Value::as_f64), 100.0, 50.0, 150.0),
+        "scale": normalize_scale_preset(tuning.get("scale").and_then(Value::as_f64)),
         "offsetX": clamp_number(tuning.get("offsetX").and_then(Value::as_f64), 0.0, -220.0, 220.0),
         "offsetY": clamp_number(tuning.get("offsetY").and_then(Value::as_f64), 0.0, -220.0, 220.0)
     });
@@ -847,14 +877,10 @@ fn chrono_like_timestamp() -> String {
         .unwrap_or_else(|| "now".to_string())
 }
 
-fn start_protocol(app: &AppHandle, backend: &mut AppBackend) -> Result<(), String> {
-    if backend.protocol.is_some() {
-        return Ok(());
-    }
+fn spawn_protocol_child(app: &AppHandle) -> Result<ManagedChild, String> {
     let bin = protocol_binary(app);
     if !bin.exists() {
-        backend.protocol_last_error = format!("devflow-protocol not found: {}", bin.display());
-        return Err(backend.protocol_last_error.clone());
+        return Err(format!("devflow-protocol not found: {}", bin.display()));
     }
     let data_dir = runtime_data_root(app).join("devflow-protocol");
     fs::create_dir_all(&data_dir).map_err(|error| error.to_string())?;
@@ -874,29 +900,23 @@ fn start_protocol(app: &AppHandle, backend: &mut AppBackend) -> Result<(), Strin
         .stderr(Stdio::from(stderr))
         .spawn()
         .map_err(|error| error.to_string())?;
-    backend.protocol = Some(ManagedChild { child });
-    backend.protocol_last_error.clear();
-    if !wait_for_protocol_port(Duration::from_secs(4)) {
-        backend.protocol_last_error =
-            "devflow-protocol started but health port did not become ready".to_string();
-        append_log(&log_path, &backend.protocol_last_error);
-    }
-    Ok(())
+    Ok(ManagedChild { child })
 }
 
-fn wait_for_protocol_port(timeout: Duration) -> bool {
-    let addr: SocketAddr = match "127.0.0.1:4317".parse() {
-        Ok(addr) => addr,
-        Err(_) => return false,
-    };
-    let start = Instant::now();
-    while start.elapsed() < timeout {
-        if TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(150));
+fn start_protocol(app: &AppHandle, backend: &mut AppBackend) -> Result<(), String> {
+    if backend.protocol.is_some() {
+        return Ok(());
     }
-    false
+    let child = match spawn_protocol_child(app) {
+        Ok(child) => child,
+        Err(error) => {
+            backend.protocol_last_error = error;
+            return Err(backend.protocol_last_error.clone());
+        }
+    };
+    backend.protocol = Some(child);
+    backend.protocol_last_error.clear();
+    Ok(())
 }
 
 fn stop_child(child: &mut Option<ManagedChild>) {
@@ -923,21 +943,17 @@ fn child_exited(child: &mut Option<ManagedChild>) -> bool {
     }
 }
 
-fn start_codex_bridge(app: &AppHandle, backend: &mut AppBackend) -> Result<(), String> {
-    if backend.codex_bridge.is_some() {
-        return Ok(());
-    }
-    start_protocol(app, backend)?;
+fn spawn_codex_bridge_child(app: &AppHandle) -> Result<ManagedChild, String> {
     let python = resolve_command("python3");
     if python.is_empty() {
-        backend.codex_bridge_last_error = "Codex bridge requires python3".to_string();
-        return Err(backend.codex_bridge_last_error.clone());
+        return Err("Codex bridge requires python3".to_string());
     }
     let script = codex_bridge_script(app);
     if !script.exists() {
-        backend.codex_bridge_last_error =
-            format!("Codex bridge script not found: {}", script.display());
-        return Err(backend.codex_bridge_last_error.clone());
+        return Err(format!(
+            "Codex bridge script not found: {}",
+            script.display()
+        ));
     }
     let log_path = codex_log_path(app);
     let stdout = fs::OpenOptions::new()
@@ -959,9 +975,87 @@ fn start_codex_bridge(app: &AppHandle, backend: &mut AppBackend) -> Result<(), S
         .stderr(Stdio::from(stderr))
         .spawn()
         .map_err(|error| error.to_string())?;
-    backend.codex_bridge = Some(ManagedChild { child });
+    Ok(ManagedChild { child })
+}
+
+fn start_codex_bridge(app: &AppHandle, backend: &mut AppBackend) -> Result<(), String> {
+    if backend.codex_bridge.is_some() {
+        return Ok(());
+    }
+    start_protocol(app, backend)?;
+    let child = match spawn_codex_bridge_child(app) {
+        Ok(child) => child,
+        Err(error) => {
+            backend.codex_bridge_last_error = error;
+            return Err(backend.codex_bridge_last_error.clone());
+        }
+    };
+    backend.codex_bridge = Some(child);
     backend.codex_bridge_last_error.clear();
     Ok(())
+}
+
+fn start_codex_bridge_without_backend_lock(app: &AppHandle) -> Result<(), String> {
+    let needs_protocol = {
+        let Some(state) = app.try_state::<BackendState>() else {
+            return Err("backend state unavailable".to_string());
+        };
+        let backend = state
+            .lock()
+            .map_err(|_| "backend lock poisoned".to_string())?;
+        if backend.codex_bridge.is_some() {
+            return Ok(());
+        }
+        backend.protocol.is_none()
+    };
+
+    if needs_protocol {
+        let mut protocol_child = Some(spawn_protocol_child(app)?);
+        let mut duplicate_protocol = None;
+        let Some(state) = app.try_state::<BackendState>() else {
+            stop_child(&mut protocol_child);
+            return Err("backend state unavailable".to_string());
+        };
+        let Ok(mut backend) = state.lock() else {
+            stop_child(&mut protocol_child);
+            return Err("backend lock poisoned".to_string());
+        };
+        if backend.protocol.is_none() {
+            backend.protocol = protocol_child.take();
+            backend.protocol_last_error.clear();
+        } else {
+            duplicate_protocol = protocol_child.take();
+        }
+        if backend.codex_bridge.is_some() {
+            let _ = update_state_inner(app, &mut backend, json!({ "codexBridgeEnabled": true }));
+            drop(backend);
+            stop_child(&mut duplicate_protocol);
+            return Ok(());
+        }
+        drop(backend);
+        stop_child(&mut duplicate_protocol);
+    }
+
+    let mut bridge_child = Some(spawn_codex_bridge_child(app)?);
+    let mut duplicate_bridge = None;
+    let Some(state) = app.try_state::<BackendState>() else {
+        stop_child(&mut bridge_child);
+        return Err("backend state unavailable".to_string());
+    };
+    let Ok(mut backend) = state.lock() else {
+        stop_child(&mut bridge_child);
+        return Err("backend lock poisoned".to_string());
+    };
+    if backend.codex_bridge.is_none() {
+        backend.codex_bridge = bridge_child.take();
+        backend.codex_bridge_last_error.clear();
+    } else {
+        duplicate_bridge = bridge_child.take();
+    }
+    let result = update_state_inner(app, &mut backend, json!({ "codexBridgeEnabled": true }));
+    drop(backend);
+    stop_child(&mut duplicate_bridge);
+    result.map(|_| ())
 }
 
 fn claude_plugin_install_root() -> PathBuf {
@@ -1147,10 +1241,23 @@ fn runtime_status(app: &AppHandle, backend: &AppBackend) -> RuntimeStatus {
             .map(|managed| managed.child.id()),
         codex_bridge_log_path: codex_log_path(app).display().to_string(),
         codex_bridge_last_error: backend.codex_bridge_last_error.clone(),
-        claude_plugin_installed: is_claude_installed(),
-        has_bash: !resolve_command("bash").is_empty(),
-        has_node: !resolve_command("node").is_empty(),
-        has_python3: !resolve_command("python3").is_empty(),
+        claude_plugin_installed: backend.claude_plugin_installed,
+        claude_plugin_last_error: backend.claude_plugin_last_error.clone(),
+        has_bash: backend.has_bash,
+        has_node: backend.has_node,
+        has_python3: backend.has_python3,
+    }
+}
+
+fn menu_snapshot(backend: &AppBackend) -> MenuSnapshot {
+    MenuSnapshot {
+        state: backend.state.clone(),
+        models: backend.models.clone(),
+        codex_bridge_running: backend.codex_bridge.is_some(),
+        claude_plugin_installed: backend.claude_plugin_installed,
+        has_bash: backend.has_bash,
+        has_node: backend.has_node,
+        has_python3: backend.has_python3,
     }
 }
 
@@ -1161,10 +1268,13 @@ fn update_tray_menu(app: &AppHandle) {
     let Ok(backend) = state_mutex.lock() else {
         return;
     };
-    let Some(tray) = backend.tray.as_ref() else {
+    let Some(tray) = backend.tray.clone() else {
         return;
     };
-    if let Ok(menu) = build_menu(app, &backend) {
+    let snapshot = menu_snapshot(&backend);
+    drop(backend);
+    let menu = build_menu(app, &snapshot).ok();
+    if let Some(menu) = menu {
         let _ = tray.set_menu(Some(menu));
     }
 }
@@ -1174,10 +1284,12 @@ fn motion_member_label(file_path: &str, index: usize) -> String {
         .file_stem()
         .and_then(|name| name.to_str())
         .map(|name| {
-            name.trim_start_matches(|c: char| {
-                c.is_ascii_digit() || c == '_' || c == '-' || c.is_whitespace()
-            })
-            .to_string()
+            name.strip_suffix(".motion3")
+                .unwrap_or(name)
+                .trim_start_matches(|c: char| {
+                    c.is_ascii_digit() || c == '_' || c == '-' || c.is_whitespace()
+                })
+                .to_string()
         })
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| format!("Motion {}", index + 1))
@@ -1250,23 +1362,25 @@ fn event_behavior_for_motion(model: &Value, motion: &str) -> Value {
         .unwrap_or_else(|| json!({ "expression": "", "mood": "calm" }))
 }
 
-fn selected_model_config(backend: &AppBackend) -> Value {
-    let selected = backend
-        .state
+fn selected_model_config_from(state: &Value, models: &[ModelInfo]) -> Value {
+    let selected = state
         .get("selectedModelId")
         .and_then(Value::as_str)
         .unwrap_or("nito");
-    backend
-        .models
+    models
         .iter()
         .find(|model| model.id == selected)
-        .or_else(|| backend.models.first())
+        .or_else(|| models.first())
         .map(|model| model.config.clone())
         .unwrap_or(Value::Null)
 }
 
-fn build_menu(app: &AppHandle, backend: &AppBackend) -> tauri::Result<tauri::menu::Menu<Wry>> {
-    let state = &backend.state;
+fn selected_model_config(backend: &AppBackend) -> Value {
+    selected_model_config_from(&backend.state, &backend.models)
+}
+
+fn build_menu(app: &AppHandle, snapshot: &MenuSnapshot) -> tauri::Result<tauri::menu::Menu<Wry>> {
+    let state = &snapshot.state;
     let selected_model = state
         .get("selectedModelId")
         .and_then(Value::as_str)
@@ -1279,11 +1393,16 @@ fn build_menu(app: &AppHandle, backend: &AppBackend) -> tauri::Result<tauri::men
         .pointer("/avatarTuning/scale")
         .and_then(Value::as_f64)
         .unwrap_or(100.0) as i64;
-    let status = runtime_status(app, backend);
-    let current_model = selected_model_config(backend);
+    let codex_bridge_enabled = state
+        .get("codexBridgeEnabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let codex_bridge_running = snapshot.codex_bridge_running;
+    let claude_plugin_installed = snapshot.claude_plugin_installed;
+    let current_model = selected_model_config_from(&snapshot.state, &snapshot.models);
 
     let mut model_menu = SubmenuBuilder::new(app, "模型");
-    for model in &backend.models {
+    for model in &snapshot.models {
         model_menu = model_menu.item(
             &CheckMenuItemBuilder::with_id(format!("model:{}", model.id), &model.name)
                 .checked(model.id == selected_model)
@@ -1291,30 +1410,17 @@ fn build_menu(app: &AppHandle, backend: &AppBackend) -> tauri::Result<tauri::men
         );
     }
 
-    let scale_menu = SubmenuBuilder::new(app, "角色大小")
-        .items(&[
-            &CheckMenuItemBuilder::with_id("scale:preset:50", "50%")
-                .checked(scale == 50)
-                .build(app)?,
-            &CheckMenuItemBuilder::with_id("scale:preset:60", "60%")
-                .checked(scale == 60)
-                .build(app)?,
-            &CheckMenuItemBuilder::with_id("scale:preset:70", "70%")
-                .checked(scale == 70)
-                .build(app)?,
-            &CheckMenuItemBuilder::with_id("scale:preset:80", "80%")
-                .checked(scale == 80)
-                .build(app)?,
-            &CheckMenuItemBuilder::with_id("scale:preset:100", "100%")
-                .checked(scale == 100)
-                .build(app)?,
-            &CheckMenuItemBuilder::with_id("scale:preset:120", "120%")
-                .checked(scale == 120)
-                .build(app)?,
-        ])
-        .separator()
-        .item(&MenuItemBuilder::with_id("scale:smaller", "缩小一点").build(app)?)
-        .item(&MenuItemBuilder::with_id("scale:larger", "放大一点").build(app)?);
+    let scale_menu = SubmenuBuilder::new(app, "角色大小").items(&[
+        &CheckMenuItemBuilder::with_id("scale:preset:100", "大")
+            .checked(scale == 100)
+            .build(app)?,
+        &CheckMenuItemBuilder::with_id("scale:preset:80", "中")
+            .checked(scale == 80)
+            .build(app)?,
+        &CheckMenuItemBuilder::with_id("scale:preset:50", "小")
+            .checked(scale == 50)
+            .build(app)?,
+    ]);
 
     let mut behavior_menu = SubmenuBuilder::new(app, "模型行为预览");
     let mut motion_groups = model_motion_groups(&current_model);
@@ -1363,75 +1469,39 @@ fn build_menu(app: &AppHandle, backend: &AppBackend) -> tauri::Result<tauri::men
         }
     }
 
-    let services_menu = SubmenuBuilder::new(app, "后台服务")
+    let codex_menu = SubmenuBuilder::new(app, "Codex bridge")
         .item(
-            &MenuItemBuilder::new(if status.protocol_running {
-                format!(
-                    "devflow-protocol 运行中 (PID: {})",
-                    status.protocol_pid.unwrap_or_default()
-                )
+            &MenuItemBuilder::new(if codex_bridge_enabled {
+                if codex_bridge_running {
+                    "已开启"
+                } else {
+                    "已开启，等待启动"
+                }
             } else {
-                "devflow-protocol 未运行".to_string()
+                "未开启"
             })
             .enabled(false)
             .build(app)?,
         )
         .item(
             &MenuItemBuilder::with_id(
-                "protocol:toggle",
-                if status.protocol_running {
-                    "停止 devflow-protocol"
-                } else {
-                    "启动 devflow-protocol"
-                },
-            )
-            .build(app)?,
-        )
-        .separator()
-        .item(
-            &MenuItemBuilder::new(
-                if state
-                    .get("codexBridgeEnabled")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
-                {
-                    if status.codex_bridge_running {
-                        format!(
-                            "Codex bridge 已开启 (PID: {})",
-                            status.codex_bridge_pid.unwrap_or_default()
-                        )
-                    } else {
-                        "Codex bridge 已开启，等待启动".to_string()
-                    }
-                } else {
-                    "Codex bridge 未开启".to_string()
-                },
-            )
-            .enabled(false)
-            .build(app)?,
-        )
-        .item(
-            &MenuItemBuilder::with_id(
                 "codex:toggle",
-                if state
-                    .get("codexBridgeEnabled")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
-                {
+                if codex_bridge_enabled {
                     "关闭 Codex bridge"
                 } else {
                     "开启 Codex bridge"
                 },
             )
-            .enabled(status.has_python3)
+            .enabled(snapshot.has_python3)
             .build(app)?,
-        )
-        .separator()
+        );
+
+    let claude_menu = SubmenuBuilder::new(app, "Claude 全局插件")
         .item(
-            &MenuItemBuilder::new(if status.claude_plugin_installed {
-                "Claude 全局插件 已安装"
+            &MenuItemBuilder::new(if claude_plugin_installed {
+                "已安装"
             } else {
-                "Claude 全局插件 未安装"
+                "未安装"
             })
             .enabled(false)
             .build(app)?,
@@ -1439,21 +1509,17 @@ fn build_menu(app: &AppHandle, backend: &AppBackend) -> tauri::Result<tauri::men
         .item(
             &MenuItemBuilder::with_id(
                 "claude:toggle",
-                if status.claude_plugin_installed {
+                if claude_plugin_installed {
                     "卸载 Claude 全局插件"
                 } else {
                     "安装 Claude 全局插件"
                 },
             )
-            .enabled(status.has_bash && status.has_node)
+            .enabled(snapshot.has_bash && snapshot.has_node)
             .build(app)?,
-        )
-        .separator()
-        .item(
-            &MenuItemBuilder::new(status.protocol_log_path.clone())
-                .enabled(false)
-                .build(app)?,
-        )
+        );
+
+    let logs_menu = SubmenuBuilder::new(app, "日志")
         .item(&MenuItemBuilder::with_id("logs:open", "打开日志目录").build(app)?);
 
     MenuBuilder::new(app)
@@ -1504,13 +1570,10 @@ fn build_menu(app: &AppHandle, backend: &AppBackend) -> tauri::Result<tauri::men
         .item(&behavior_menu.build()?)
         .item(&scale_menu.build()?)
         .item(&MenuItemBuilder::with_id("scale:reset", "恢复默认").build(app)?)
-        .item(
-            &MenuItemBuilder::new(format!("当前大小: {scale}%"))
-                .enabled(false)
-                .build(app)?,
-        )
         .separator()
-        .item(&services_menu.build()?)
+        .item(&codex_menu.build()?)
+        .item(&claude_menu.build()?)
+        .item(&logs_menu.build()?)
         .separator()
         .item(
             &MenuItemBuilder::with_id("quit", "退出")
@@ -1862,24 +1925,6 @@ fn handle_menu(app: &AppHandle, id: &str) {
                     .unwrap_or(false),
             )
         }
-        "scale:smaller" => {
-            let scale = backend
-                .state
-                .pointer("/avatarTuning/scale")
-                .and_then(Value::as_f64)
-                .unwrap_or(100.0)
-                - 10.0;
-            patch["avatarTuning"] = json!({ "scale": scale });
-        }
-        "scale:larger" => {
-            let scale = backend
-                .state
-                .pointer("/avatarTuning/scale")
-                .and_then(Value::as_f64)
-                .unwrap_or(100.0)
-                + 10.0;
-            patch["avatarTuning"] = json!({ "scale": scale });
-        }
         "scale:reset" => {
             patch["avatarTuning"] = json!({ "scale": 100, "offsetX": 0, "offsetY": 0 })
         }
@@ -1910,29 +1955,71 @@ fn handle_menu(app: &AppHandle, id: &str) {
                 }),
             );
         }
-        "protocol:toggle" => {
-            if backend.protocol.is_some() {
-                stop_child(&mut backend.codex_bridge);
-                stop_child(&mut backend.protocol);
-            } else {
-                let _ = start_protocol(app, &mut backend);
-            }
-        }
         "codex:toggle" => {
-            if backend.codex_bridge.is_some() {
-                stop_child(&mut backend.codex_bridge);
-                patch["codexBridgeEnabled"] = Value::Bool(false);
-            } else {
-                patch["codexBridgeEnabled"] = Value::Bool(true);
-                let _ = start_codex_bridge(app, &mut backend);
-            }
+            let app_for_task = app.clone();
+            drop(backend);
+            tauri::async_runtime::spawn_blocking(move || {
+                if let Some(state) = app_for_task.try_state::<BackendState>() {
+                    if let Ok(mut backend) = state.lock() {
+                        if backend.codex_bridge.is_some() {
+                            let mut codex_bridge = backend.codex_bridge.take();
+                            let _ = update_state_inner(
+                                &app_for_task,
+                                &mut backend,
+                                json!({ "codexBridgeEnabled": false }),
+                            );
+                            drop(backend);
+                            stop_child(&mut codex_bridge);
+                        } else {
+                            drop(backend);
+                            if let Err(error) =
+                                start_codex_bridge_without_backend_lock(&app_for_task)
+                            {
+                                if let Some(state) = app_for_task.try_state::<BackendState>() {
+                                    if let Ok(mut backend) = state.lock() {
+                                        backend.codex_bridge_last_error = error;
+                                        let _ = app_for_task.emit(
+                                            STATE_EVENT,
+                                            public_state(&app_for_task, &backend),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                update_tray_menu(&app_for_task);
+            });
+            return;
         }
         "claude:toggle" => {
-            if is_claude_installed() {
-                let _ = uninstall_claude_plugin();
-            } else {
-                let _ = install_claude_plugin(app);
-            }
+            let app_for_task = app.clone();
+            let should_uninstall = backend.claude_plugin_installed;
+            drop(backend);
+            tauri::async_runtime::spawn_blocking(move || {
+                let result = if should_uninstall {
+                    uninstall_claude_plugin()
+                } else {
+                    install_claude_plugin(&app_for_task)
+                };
+                if let Some(state) = app_for_task.try_state::<BackendState>() {
+                    if let Ok(mut backend) = state.lock() {
+                        match result {
+                            Ok(()) => {
+                                backend.claude_plugin_installed = !should_uninstall;
+                                backend.claude_plugin_last_error.clear();
+                            }
+                            Err(error) => {
+                                backend.claude_plugin_last_error = error;
+                            }
+                        }
+                        let _ =
+                            app_for_task.emit(STATE_EVENT, public_state(&app_for_task, &backend));
+                    }
+                }
+                update_tray_menu(&app_for_task);
+            });
+            return;
         }
         "logs:open" => {
             let _ = fs::create_dir_all(log_dir(app));
@@ -1967,6 +2054,9 @@ fn load_initial_backend(app: &AppHandle) -> AppBackend {
         state["personaDialogue"] = persona;
     }
     state = normalize_state(state, &models);
+    let has_bash = !resolve_command("bash").is_empty();
+    let has_node = !resolve_command("node").is_empty();
+    let has_python3 = !resolve_command("python3").is_empty();
     AppBackend {
         state,
         models,
@@ -1975,6 +2065,11 @@ fn load_initial_backend(app: &AppHandle) -> AppBackend {
         codex_bridge: None,
         protocol_last_error: String::new(),
         codex_bridge_last_error: String::new(),
+        claude_plugin_installed: is_claude_installed(),
+        claude_plugin_last_error: String::new(),
+        has_bash,
+        has_node,
+        has_python3,
         suppress_window_move_persistence: false,
     }
 }
@@ -2063,8 +2158,9 @@ pub fn run() {
                 let state = app.state::<BackendState>();
                 if let Ok(backend) = state.lock() {
                     apply_window_state(&handle, &backend.state);
-                    let menu = build_menu(&handle, &backend)?;
+                    let snapshot = menu_snapshot(&backend);
                     drop(backend);
+                    let menu = build_menu(&handle, &snapshot)?;
                     let tray_icon = tray_template_icon(&handle);
                     let tray = TrayIconBuilder::new()
                         .tooltip("DPartner")

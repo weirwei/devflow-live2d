@@ -49,8 +49,11 @@ const SETTINGS_FILE_NAME = "devflow-live2d-settings.json";
 const DEVFLOW_CONFIG_DIR = path.join(homedir(), ".devflow", "live2d");
 const DEVFLOW_CONFIG_FILE = path.join(DEVFLOW_CONFIG_DIR, "config.json");
 const AVATAR_LIMIT = 220;
-const SCALE_MIN = 50;
-const SCALE_MAX = 150;
+const SCALE_PRESETS = [
+  { label: "大", scale: 100 },
+  { label: "中", scale: 80 },
+  { label: "小", scale: 50 },
+];
 const DEFAULT_PROTOCOL_BASE_URL =
   process.env.DEVFLOW_PROTOCOL_URL?.trim() || "http://127.0.0.1:4317";
 const OVERLAY_WIDTH = 420;
@@ -81,14 +84,17 @@ function safeNumber(value, fallback, min, max) {
   return clamp(parsed, min, max);
 }
 
+function normalizeScalePreset(value, fallback = DEFAULT_STATE.avatarTuning.scale) {
+  const parsed = Number(value);
+  const target = Number.isFinite(parsed) ? parsed : fallback;
+  return SCALE_PRESETS.reduce((closest, preset) =>
+    Math.abs(preset.scale - target) < Math.abs(closest.scale - target) ? preset : closest,
+  ).scale;
+}
+
 function normalizeAvatarTuning(input = {}) {
   return {
-    scale: safeNumber(
-      input.scale,
-      DEFAULT_STATE.avatarTuning.scale,
-      SCALE_MIN,
-      SCALE_MAX,
-    ),
+    scale: normalizeScalePreset(input.scale),
     offsetX: safeNumber(
       input.offsetX,
       DEFAULT_STATE.avatarTuning.offsetX,
@@ -248,7 +254,7 @@ function readModel3Json(model) {
 
 function motionMemberLabel(filePath = "", index = 0) {
   const fileName = path.basename(String(filePath || ""), ".motion3.json");
-  return fileName.replace(/^\d+[_\s-]*/, "") || `Motion ${index + 1}`;
+  return fileName.replace(/\.motion3$/i, "").replace(/^\d+[_\s-]*/, "") || `Motion ${index + 1}`;
 }
 
 function getModelMotionGroups(model) {
@@ -794,13 +800,15 @@ class DesktopApp {
     const currentScale = state.avatarTuning.scale;
     const currentModel = getLive2DModelById(state.selectedModelId, modelCatalog);
     const currentModelId = currentModel.id;
-    const presetScales = [50, 60, 70, 80, 100, 120];
+    const presetScales = SCALE_PRESETS;
     const behaviorOptions = getAvatarBehaviorPreviewOptions(currentModel);
     const personaConfig = resolvePersonaDialogueConfig(state.personaDialogue);
     const personaProvider = personaConfig.provider || "openai-compatible";
     const personaApiUrl = state.personaDialogue.apiUrl || DEFAULT_PERSONA_API_URL;
     const keyConfigured = personaConfig.configured;
     const runtimeStatus = this.runtime.getStatus();
+    const codexBridgeRunning = runtimeStatus.codexBridge.running;
+    const claudePluginInstalled = runtimeStatus.claudePlugin.installed;
 
     return Menu.buildFromTemplate([
       {
@@ -869,39 +877,18 @@ class DesktopApp {
       {
         label: "角色大小",
         submenu: [
-          ...presetScales.map((scale) => ({
-            label: `${scale}%`,
-            type: "checkbox",
-            checked: currentScale === scale,
+          ...presetScales.map((preset) => ({
+            label: preset.label,
+            type: "radio",
+            checked: currentScale === preset.scale,
             click: () =>
               this.updateState({
                 avatarTuning: {
                   ...state.avatarTuning,
-                  scale,
+                  scale: preset.scale,
                 },
               }),
           })),
-          { type: "separator" },
-          {
-            label: "缩小一点",
-            click: () =>
-              this.updateState({
-                avatarTuning: {
-                  ...state.avatarTuning,
-                  scale: currentScale - 10,
-                },
-              }),
-          },
-          {
-            label: "放大一点",
-            click: () =>
-              this.updateState({
-                avatarTuning: {
-                  ...state.avatarTuning,
-                  scale: currentScale + 10,
-                },
-              }),
-          },
         ],
       },
       {
@@ -1000,83 +987,54 @@ class DesktopApp {
       },
       { type: "separator" },
       {
-        label: "后台服务",
+        label: "Codex bridge",
         submenu: [
           {
-            label: "devflow-protocol",
-            submenu: [
-              {
-                label: runtimeStatus.protocol.running
-                  ? `devflow-protocol 运行中（PID: ${runtimeStatus.protocol.pid}）`
-                  : "devflow-protocol 未运行",
-                enabled: false,
-              },
-              {
-                label: runtimeStatus.protocol.running ? "停止 devflow-protocol" : "启动 devflow-protocol",
-                enabled: true,
-                click: this.withMenuAction("toggle protocol", async () => {
-                  if (this.runtime.getStatus().protocol.running) {
-                    await this.runtime.stopProtocol();
-                  } else {
-                    await this.runtime.startProtocol();
-                  }
-                }),
-              },
-            ],
-          },
-          {
-            label: "Codex bridge",
-            submenu: [
-              {
-                label: state.codexBridgeEnabled
-                  ? runtimeStatus.codexBridge.running
-                    ? `Codex bridge 已开启（PID: ${runtimeStatus.codexBridge.pid}）`
-                    : "Codex bridge 已开启，等待启动"
-                  : "Codex bridge 未开启",
-                enabled: false,
-              },
-              {
-                label: state.codexBridgeEnabled ? "关闭 Codex bridge" : "开启 Codex bridge",
-                enabled: runtimeStatus.capabilities.python3,
-                click: this.withMenuAction("toggle Codex bridge", async () => {
-                  if (this.store.get().codexBridgeEnabled) {
-                    this.updateState({ codexBridgeEnabled: false });
-                    await this.runtime.stopCodexBridge();
-                  } else {
-                    this.updateState({ codexBridgeEnabled: true });
-                    await this.runtime.startCodexBridge();
-                  }
-                }),
-              },
-            ],
-          },
-          {
-            label: "Claude 全局插件",
-            submenu: [
-              {
-                label: runtimeStatus.claudePlugin.installed
-                  ? "Claude 全局插件 已安装"
-                  : "Claude 全局插件 未安装",
-                enabled: false,
-              },
-              {
-                label: runtimeStatus.claudePlugin.installed ? "卸载 Claude 全局插件" : "安装 Claude 全局插件",
-                enabled: runtimeStatus.capabilities.bash && runtimeStatus.capabilities.node,
-                click: this.withMenuAction("toggle Claude plugin", async () => {
-                  if (this.runtime.getStatus().claudePlugin.installed) {
-                    await this.runtime.uninstallClaudeGlobalPlugin();
-                  } else {
-                    await this.runtime.installClaudeGlobalPlugin();
-                  }
-                }),
-              },
-            ],
-          },
-          { type: "separator" },
-          {
-            label: runtimeStatus.protocol.logPath,
+            label: state.codexBridgeEnabled
+              ? codexBridgeRunning
+                ? "已开启"
+                : "已开启，等待启动"
+              : "未开启",
             enabled: false,
           },
+          {
+            label: state.codexBridgeEnabled ? "关闭 Codex bridge" : "开启 Codex bridge",
+            enabled: runtimeStatus.capabilities.python3,
+            click: this.withMenuAction("toggle Codex bridge", async () => {
+              if (this.store.get().codexBridgeEnabled) {
+                this.updateState({ codexBridgeEnabled: false });
+                await this.runtime.stopCodexBridge();
+              } else {
+                await this.runtime.startCodexBridge();
+                this.updateState({ codexBridgeEnabled: true });
+              }
+            }),
+          },
+        ],
+      },
+      {
+        label: "Claude 全局插件",
+        submenu: [
+          {
+            label: claudePluginInstalled ? "已安装" : "未安装",
+            enabled: false,
+          },
+          {
+            label: claudePluginInstalled ? "卸载 Claude 全局插件" : "安装 Claude 全局插件",
+            enabled: runtimeStatus.capabilities.bash && runtimeStatus.capabilities.node,
+            click: this.withMenuAction("toggle Claude plugin", async () => {
+              if (this.runtime.claudePluginInstalled) {
+                await this.runtime.uninstallClaudeGlobalPlugin();
+              } else {
+                await this.runtime.installClaudeGlobalPlugin();
+              }
+            }),
+          },
+        ],
+      },
+      {
+        label: "日志",
+        submenu: [
           {
             label: "打开日志目录",
             click: () => {
@@ -1084,27 +1042,6 @@ class DesktopApp {
               void shell.openPath(this.runtime.getLogDir());
             },
           },
-          ...(runtimeStatus.protocol.lastError || runtimeStatus.codexBridge.lastError
-            ? [
-                { type: "separator" },
-                ...(runtimeStatus.protocol.lastError
-                  ? [
-                      {
-                        label: `protocol 最近错误: ${runtimeStatus.protocol.lastError}`.slice(0, 140),
-                        enabled: false,
-                      },
-                    ]
-                  : []),
-                ...(runtimeStatus.codexBridge.lastError
-                  ? [
-                      {
-                        label: `Codex bridge 最近错误: ${runtimeStatus.codexBridge.lastError}`.slice(0, 140),
-                        enabled: false,
-                      },
-                    ]
-                  : []),
-              ]
-            : []),
         ],
       },
       { type: "separator" },
