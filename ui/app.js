@@ -31,6 +31,8 @@ const LIVE2D_BASE_AVATAR_HEIGHT = 620;
 const LIVE2D_MIN_AVATAR_HEIGHT = 520;
 const LIVE2D_MAX_AVATAR_HEIGHT = 760;
 const SHELL_VERTICAL_PADDING = 24;
+const LIVE2D_BASE_BUBBLE_GAP = 18;
+const LIVE2D_SMALL_SCALE_EXTRA_BUBBLE_GAP = 22;
 const PERSONA_MOTION_BY_MOOD = {
   calm: "idleWave",
   attentive: "acknowledge",
@@ -115,6 +117,17 @@ let pendingWindowSizeSyncAfterDrag = false;
 
 function clampNumber(value, min, max) {
   return Math.min(max, Math.max(min, value));
+}
+
+function getAvatarTuningScale() {
+  const rawScale = Number(appState.avatarTuning.scale);
+  return Number.isFinite(rawScale) ? rawScale / 100 : 1;
+}
+
+function getLive2DBubbleGap() {
+  if (appState.runtime.id === "mock") return -6;
+  const tuningScale = clampNumber(getAvatarTuningScale(), 0.4, 1);
+  return LIVE2D_BASE_BUBBLE_GAP + (1 - tuningScale) * LIVE2D_SMALL_SCALE_EXTRA_BUBBLE_GAP;
 }
 
 function stopCustomWindowDrag() {
@@ -203,8 +216,7 @@ function scheduleWindowContentSizeSync() {
     const bubbleRect = elements.bubble.getBoundingClientRect();
     const bubbleVisible = elements.bubble.classList.contains("bubble--visible");
     const usingLive2D = appState.runtime.id !== "mock";
-    const rawTuningScale = Number(appState.avatarTuning.scale);
-    const tuningScale = Number.isFinite(rawTuningScale) ? rawTuningScale / 100 : 1;
+    const tuningScale = getAvatarTuningScale();
     const avatarHeight = usingLive2D
       ? clampNumber(
           LIVE2D_BASE_AVATAR_HEIGHT * tuningScale,
@@ -212,7 +224,7 @@ function scheduleWindowContentSizeSync() {
           LIVE2D_MAX_AVATAR_HEIGHT,
         )
       : 420;
-    const bubbleHeight = bubbleVisible ? bubbleRect.height + 18 : 0;
+    const bubbleHeight = bubbleVisible ? bubbleRect.height + getLive2DBubbleGap() : 0;
     const shellHeight = Math.ceil(
       Math.max(MIN_WINDOW_CONTENT_HEIGHT, avatarHeight + bubbleHeight + SHELL_VERTICAL_PADDING),
     );
@@ -238,8 +250,7 @@ function scheduleWindowContentSizeSync() {
 function applyAvatarTransformVariables() {
   const root = document.documentElement;
   const usingLive2D = appState.runtime.id !== "mock";
-  const rawScale = Number(appState.avatarTuning.scale);
-  const tuningScale = Number.isFinite(rawScale) ? rawScale / 100 : 1;
+  const tuningScale = getAvatarTuningScale();
   const visualScale = usingLive2D ? 1 : tuningScale;
 
   root.style.setProperty("--avatar-scale", String(visualScale));
@@ -255,11 +266,11 @@ function applyLive2DLayoutTuning() {
   const baseLayout = appState.runtime.layoutBase || {};
   const baseRuntimeWidth = Number(baseLayout.runtimeWidth) || 1.1;
   const manifestScale = Number(baseLayout.scale) || 1;
-  const rawScale = Number(appState.avatarTuning.scale);
-  const tuningScale = Number.isFinite(rawScale) ? rawScale / 100 : 1;
+  const tuningScale = getAvatarTuningScale();
+  const layoutScale = clampNumber(tuningScale, 0, 1);
   const nextLayout = {
     runtimeWidth: baseRuntimeWidth * manifestScale * tuningScale,
-    centerX: Number(baseLayout.centerX) || 0.45,
+    centerX: (Number(baseLayout.centerX) || 0.45) * layoutScale,
     centerY: Number(baseLayout.centerY) || 0.12,
   };
 
@@ -272,7 +283,7 @@ function updateBubbleLayout() {
   const avatarRect = elements.avatarShell.getBoundingClientRect();
   const bubbleRect = elements.bubble.getBoundingClientRect();
   const viewportPadding = 14;
-  const bubbleGap = appState.runtime.id === "mock" ? -6 : 10;
+  const bubbleGap = getLive2DBubbleGap();
   const visualAnchorRatio = appState.runtime.id === "mock" ? 0.2 : 0.55;
   const minTop = viewportPadding;
   const maxTop = Math.max(
