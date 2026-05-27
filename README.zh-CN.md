@@ -4,7 +4,7 @@
 
 ![Devflow Live2D desktop overlay demo](docs/demo.png)
 
-`devflow-live2d` 是 Devflow 的 macOS Live2D 桌面悬浮窗客户端。它运行在 Electron 中，负责把 `devflow-protocol` 的运行事件转换成桌宠的状态、动作、表情和气泡文本。
+`devflow-live2d` 是 Devflow 的 macOS Live2D 桌面悬浮窗客户端。它运行在 Tauri 中，负责把 `devflow-protocol` 的运行事件转换成桌宠的状态、动作、表情和气泡文本。
 
 ## 功能
 
@@ -48,7 +48,7 @@ npm run dist:mac
 
 - `npm run doctor` 检查 Live2D manifest、adapter、默认模型 JSON 和官方运行时资源。
 - `npm test` 检查主要 JavaScript 文件语法，并运行 Bun 测试。
-- `npm run dist:mac` 先准备内置协议资源，再通过 `electron-builder` 输出 macOS `dmg` 和 `zip`。
+- `npm run dist:mac` 先准备内置协议资源，再通过 Tauri 输出 macOS 应用构建产物。
 
 ## 本地协议服务
 
@@ -153,8 +153,7 @@ npm test
 
 ```text
 .
-  main.js                         Electron 主进程、托盘菜单和服务编排
-  preload.js                      renderer 安全桥接
+  src-tauri/                      Tauri 外壳、托盘菜单、应用状态和服务编排
   ui/                             桌面悬浮窗页面
   src/app/                        应用状态与本地服务运行时
   src/dialogue/                   桌宠气泡和 AI 闲聊逻辑

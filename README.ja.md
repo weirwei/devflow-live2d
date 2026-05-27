@@ -4,7 +4,7 @@
 
 ![Devflow Live2D desktop overlay demo](docs/demo.png)
 
-`devflow-live2d` は Devflow 向けの macOS Live2D デスクトップオーバーレイクライアントです。Electron 上で動作し、`devflow-protocol` の実行イベントをアバターの状態、モーション、表情、吹き出しに変換します。
+`devflow-live2d` は Devflow 向けの macOS Live2D デスクトップオーバーレイクライアントです。Tauri 上で動作し、`devflow-protocol` の実行イベントをアバターの状態、モーション、表情、吹き出しに変換します。
 
 ## 機能
 
@@ -48,7 +48,7 @@ npm run dist:mac
 
 - `npm run doctor` は Live2D manifest、adapter、デフォルトモデル JSON、公式ランタイムリソースを検証します。
 - `npm test` は主要 JavaScript ファイルの構文を確認し、Bun のテストを実行します。
-- `npm run dist:mac` は同梱プロトコルリソースを準備してから、`electron-builder` で macOS 用の `dmg` と `zip` を生成します。
+- `npm run dist:mac` は同梱プロトコルリソースを準備してから、Tauri で macOS アプリ成果物を生成します。
 
 ## ローカルプロトコルサービス
 
@@ -153,8 +153,7 @@ npm test
 
 ```text
 .
-  main.js                         Electron メインプロセス、トレイメニュー、サービス制御
-  preload.js                      renderer への安全なブリッジ
+  src-tauri/                      Tauri シェル、トレイメニュー、アプリ状態、サービス制御
   ui/                             デスクトップオーバーレイ画面
   src/app/                        アプリ状態とローカルサービスランタイム
   src/dialogue/                   吹き出しと AI 雑談ロジック
