@@ -26,6 +26,13 @@ import {
 } from "../src/avatar/interruptPolicy.js";
 
 const DEFAULT_PROTOCOL_BASE_URL = "http://127.0.0.1:4317";
+const MIN_WINDOW_CONTENT_HEIGHT = 360;
+const LIVE2D_BASE_AVATAR_HEIGHT = 620;
+const LIVE2D_MIN_AVATAR_HEIGHT = 520;
+const LIVE2D_MAX_AVATAR_HEIGHT = 760;
+const SHELL_VERTICAL_PADDING = 24;
+const LIVE2D_BASE_BUBBLE_GAP = 18;
+const LIVE2D_SMALL_SCALE_EXTRA_BUBBLE_GAP = 22;
 const PERSONA_MOTION_BY_MOOD = {
   calm: "idleWave",
   attentive: "acknowledge",
@@ -103,11 +110,148 @@ const elements = {
 };
 
 let bubbleLayoutFrame = 0;
+let windowSizeFrame = 0;
+let lastSyncedWindowSize = { width: 0, height: 0 };
+let windowDragState = null;
+let pendingWindowSizeSyncAfterDrag = false;
+
+function clampNumber(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function getAvatarTuningScale() {
+  const rawScale = Number(appState.avatarTuning.scale);
+  return Number.isFinite(rawScale) ? rawScale / 100 : 1;
+}
+
+function getLive2DBubbleGap() {
+  if (appState.runtime.id === "mock") return -6;
+  const tuningScale = clampNumber(getAvatarTuningScale(), 0.4, 1);
+  return LIVE2D_BASE_BUBBLE_GAP + (1 - tuningScale) * LIVE2D_SMALL_SCALE_EXTRA_BUBBLE_GAP;
+}
+
+function stopCustomWindowDrag() {
+  if (!windowDragState) return;
+  const finalPosition = windowDragState.lastPosition;
+  if (windowDragState.target?.hasPointerCapture?.(windowDragState.pointerId)) {
+    windowDragState.target.releasePointerCapture(windowDragState.pointerId);
+  }
+  if (windowDragState.frame) cancelAnimationFrame(windowDragState.frame);
+  document.removeEventListener("pointermove", handleCustomWindowDragMove);
+  document.removeEventListener("pointerup", stopCustomWindowDrag);
+  document.removeEventListener("pointercancel", stopCustomWindowDrag);
+  windowDragState = null;
+  if (finalPosition && typeof window.desktopAPI?.setWindowPosition === "function") {
+    void window.desktopAPI
+      .setWindowPosition({ ...finalPosition, persist: true })
+      .catch((error) => {
+        console.warn("Window position persist failed.", error);
+      });
+  }
+  if (pendingWindowSizeSyncAfterDrag) {
+    pendingWindowSizeSyncAfterDrag = false;
+    scheduleWindowContentSizeSync();
+  }
+}
+
+function handleCustomWindowDragMove(event) {
+  if (
+    !windowDragState ||
+    !windowDragState.ready ||
+    typeof window.desktopAPI?.setWindowPosition !== "function"
+  ) {
+    return;
+  }
+  const nextX = windowDragState.windowX + event.screenX - windowDragState.pointerX;
+  const nextY = windowDragState.windowY + event.screenY - windowDragState.pointerY;
+  windowDragState.lastPosition = { x: nextX, y: nextY };
+  if (windowDragState.frame) cancelAnimationFrame(windowDragState.frame);
+  windowDragState.frame = requestAnimationFrame(() => {
+    if (!windowDragState) return;
+    void window.desktopAPI
+      .setWindowPosition({ x: nextX, y: nextY, persist: false })
+      .catch((error) => {
+        console.warn("Window position update failed.", error);
+      });
+  });
+}
+
+async function startCustomWindowDrag(event) {
+  if (event.button !== 0 || typeof window.desktopAPI?.getWindowFrame !== "function") return;
+  event.preventDefault();
+  event.stopPropagation();
+  stopCustomWindowDrag();
+  event.currentTarget?.setPointerCapture?.(event.pointerId);
+  windowDragState = {
+    target: event.currentTarget,
+    pointerId: event.pointerId,
+    pointerX: event.screenX,
+    pointerY: event.screenY,
+    windowX: 0,
+    windowY: 0,
+    frame: 0,
+    lastPosition: null,
+    ready: false,
+  };
+  document.addEventListener("pointermove", handleCustomWindowDragMove);
+  document.addEventListener("pointerup", stopCustomWindowDrag, { once: true });
+  document.addEventListener("pointercancel", stopCustomWindowDrag, { once: true });
+  const frame = await window.desktopAPI.getWindowFrame();
+  if (!windowDragState || windowDragState.pointerId !== event.pointerId) return;
+  windowDragState.windowX = Number(frame?.x) || 0;
+  windowDragState.windowY = Number(frame?.y) || 0;
+  windowDragState.ready = true;
+}
+
+function scheduleWindowContentSizeSync() {
+  if (windowSizeFrame) cancelAnimationFrame(windowSizeFrame);
+  windowSizeFrame = requestAnimationFrame(() => {
+    windowSizeFrame = 0;
+    if (typeof window.desktopAPI?.syncWindowContentSize !== "function") return;
+    if (windowDragState) {
+      pendingWindowSizeSyncAfterDrag = true;
+      return;
+    }
+
+    const bubbleRect = elements.bubble.getBoundingClientRect();
+    const bubbleVisible = elements.bubble.classList.contains("bubble--visible");
+    const usingLive2D = appState.runtime.id !== "mock";
+    const tuningScale = getAvatarTuningScale();
+    const avatarHeight = usingLive2D
+      ? clampNumber(
+          LIVE2D_BASE_AVATAR_HEIGHT * tuningScale,
+          LIVE2D_MIN_AVATAR_HEIGHT,
+          LIVE2D_MAX_AVATAR_HEIGHT,
+        )
+      : 420;
+    const bubbleHeight = bubbleVisible ? bubbleRect.height + getLive2DBubbleGap() : 0;
+    const shellHeight = Math.ceil(
+      Math.max(MIN_WINDOW_CONTENT_HEIGHT, avatarHeight + bubbleHeight + SHELL_VERTICAL_PADDING),
+    );
+    document.documentElement.style.setProperty("--avatar-fit-height", `${Math.ceil(avatarHeight)}px`);
+    document.documentElement.style.setProperty("--shell-fit-height", `${shellHeight}px`);
+
+    const shellRect = elements.shell.getBoundingClientRect();
+    const width = Math.ceil(Math.max(420, shellRect.width + 24));
+    const height = Math.ceil(Math.max(MIN_WINDOW_CONTENT_HEIGHT, shellHeight + 24));
+    if (
+      Math.abs(width - lastSyncedWindowSize.width) < 2 &&
+      Math.abs(height - lastSyncedWindowSize.height) < 2
+    ) {
+      return;
+    }
+    lastSyncedWindowSize = { width, height };
+    void window.desktopAPI.syncWindowContentSize({ width, height }).catch((error) => {
+      console.warn("Window size sync failed.", error);
+    });
+  });
+}
 
 function applyAvatarTransformVariables() {
   const root = document.documentElement;
   const usingLive2D = appState.runtime.id !== "mock";
-  const visualScale = usingLive2D ? 1 : appState.avatarTuning.scale / 100;
+  const tuningScale = getAvatarTuningScale();
+  const visualScale = usingLive2D ? 1 : tuningScale;
 
   root.style.setProperty("--avatar-scale", String(visualScale));
   root.style.setProperty("--avatar-offset-x", `${appState.avatarTuning.offsetX}px`);
@@ -122,10 +266,11 @@ function applyLive2DLayoutTuning() {
   const baseLayout = appState.runtime.layoutBase || {};
   const baseRuntimeWidth = Number(baseLayout.runtimeWidth) || 1.1;
   const manifestScale = Number(baseLayout.scale) || 1;
-  const tuningScale = (Number(appState.avatarTuning.scale) || 100) / 100;
+  const tuningScale = getAvatarTuningScale();
+  const layoutScale = clampNumber(tuningScale, 0, 1);
   const nextLayout = {
     runtimeWidth: baseRuntimeWidth * manifestScale * tuningScale,
-    centerX: Number(baseLayout.centerX) || 0.45,
+    centerX: (Number(baseLayout.centerX) || 0.45) * layoutScale,
     centerY: Number(baseLayout.centerY) || 0.12,
   };
 
@@ -138,8 +283,8 @@ function updateBubbleLayout() {
   const avatarRect = elements.avatarShell.getBoundingClientRect();
   const bubbleRect = elements.bubble.getBoundingClientRect();
   const viewportPadding = 14;
-  const bubbleGap = -6;
-  const visualAnchorRatio = appState.runtime.id === "mock" ? 0.2 : 0.42;
+  const bubbleGap = getLive2DBubbleGap();
+  const visualAnchorRatio = appState.runtime.id === "mock" ? 0.2 : 0.55;
   const minTop = viewportPadding;
   const maxTop = Math.max(
     minTop,
@@ -217,6 +362,7 @@ function renderBubble() {
   elements.bubble.classList.toggle("bubble--visible", isVisible);
   elements.bubble.classList.toggle("bubble--hidden", !isVisible);
   scheduleBubbleLayout();
+  scheduleWindowContentSizeSync();
 }
 
 function renderAll() {
@@ -226,6 +372,7 @@ function renderAll() {
   renderRuntimeMode();
   renderBubble();
   scheduleBubbleLayout();
+  scheduleWindowContentSizeSync();
   void renderAvatarFrame();
 }
 
@@ -530,7 +677,7 @@ async function initializeRuntime() {
   };
 
   if (config.ok && config.adapterScript) {
-    await import(`../${config.adapterScript}`);
+    await import(/* @vite-ignore */ `../${config.adapterScript}`);
   }
 
   appState.adapter = new Live2DAdapter({ container: elements.avatarShell });
@@ -575,6 +722,12 @@ function bindInteractions() {
     },
   });
   controller.mount();
+
+  elements.avatarShell.addEventListener("pointerdown", (event) => {
+    void startCustomWindowDrag(event).catch((error) => {
+      console.warn("Window drag start failed.", error);
+    });
+  });
 }
 
 function bindViewportLayout() {

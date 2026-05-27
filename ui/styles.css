@@ -16,6 +16,8 @@
   --avatar-tilt-x: 0deg;
   --avatar-tilt-y: 0deg;
   --bubble-top: 14px;
+  --avatar-fit-height: 620px;
+  --shell-fit-height: 720px;
 }
 
 * {
@@ -37,7 +39,7 @@ body {
 
 body {
   display: flex;
-  align-items: flex-end;
+  align-items: flex-start;
   justify-content: center;
   padding: 12px;
   -webkit-app-region: no-drag;
@@ -87,7 +89,7 @@ input[type="range"]::-webkit-slider-thumb {
 .shell {
   position: relative;
   width: min(100%, 520px);
-  height: min(100%, 560px);
+  height: min(100%, var(--shell-fit-height));
   padding: 0;
   display: block;
   pointer-events: none;
@@ -127,17 +129,19 @@ input[type="range"]::-webkit-slider-thumb {
   bottom: auto;
   left: 50%;
   z-index: 24;
-  width: min(86vw, 520px);
+  width: min(calc(100% - 24px), 468px);
   max-height: 180px;
   overflow: hidden;
   padding: 12px 14px;
-  border-radius: 16px;
+  border-radius: 18px;
   transform: translate(-50%, 0);
   transition: opacity 120ms ease, transform 120ms ease;
   border: 1px solid rgba(186, 214, 246, 0.22);
   background: rgba(11, 22, 36, 0.58);
   box-shadow: 0 3px 10px rgba(2, 8, 18, 0.14);
+  clip-path: inset(0 round 18px);
   backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
   pointer-events: auto;
   -webkit-app-region: drag;
 }
@@ -337,7 +341,7 @@ input[type="range"]::-webkit-slider-thumb {
 
 .shell--panel-hidden .avatar-shell--live2d {
   width: min(100%, 480px);
-  height: min(100%, 520px);
+  height: min(100%, var(--avatar-fit-height));
   max-height: 100%;
 }
 

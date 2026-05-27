@@ -11,5 +11,8 @@ claude.md
 build-resources/*
 !build-resources/icon.icns
 !build-resources/icon.png
+build-resources/tauri-web/
 dist/
 .claude
+src-tauri/target/
+src-tauri/gen/

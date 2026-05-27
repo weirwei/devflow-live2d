@@ -48,10 +48,15 @@ function main() {
   fs.copyFileSync(protocolBinary, targetBinary);
   fs.chmodSync(targetBinary, 0o755);
 
+  const tauriMacArm64Binary = path.join(targetBinDir, "devflow-protocol-aarch64-apple-darwin");
+  fs.copyFileSync(protocolBinary, tauriMacArm64Binary);
+  fs.chmodSync(tauriMacArm64Binary, 0o755);
+
   // Copy claude-plugin
   copyDir(pluginDir, path.join(targetProtocolRoot, "claude-plugin"));
 
   console.log(`[prepare-bundle-resources] copied devflow-protocol binary -> ${targetBinary}`);
+  console.log(`[prepare-bundle-resources] copied Tauri sidecar binary -> ${tauriMacArm64Binary}`);
   console.log(`[prepare-bundle-resources] copied claude-plugin -> ${path.join(targetProtocolRoot, "claude-plugin")}`);
 }
 

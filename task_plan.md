@@ -18,7 +18,6 @@ Package `devflow-live2d` as a macOS app that bundles `devflow-protocol`, starts 
 ## Decisions Made
 - Reuse sibling repositories and existing install/uninstall scripts instead of inventing a second plugin installer.
 - Start `devflow-protocol` automatically with the desktop app; make Codex bridge explicitly toggleable from the tray menu.
-- Treat bundled app resources as read-only assets under Electron `process.resourcesPath`, while persistent data remains under the user home directory.
 - Avoid calling the packaged `devflow-protocol/install.sh` directly because it writes state into its own script directory; instead the desktop app now performs plugin deployment and settings mutation itself.
 - Replace the Python Codex bridge runtime with a Bun-based local bridge so the packaged app only needs bundled `bun` and `jq`.
 

@@ -4,7 +4,7 @@
 
 ![Devflow Live2D desktop overlay demo](docs/demo.png)
 
-`devflow-live2d` is the macOS Live2D desktop overlay client for Devflow. It runs on Electron and maps `devflow-protocol` runtime events into avatar state, motions, expressions, and speech bubbles.
+`devflow-live2d` is the macOS Live2D desktop overlay client for Devflow. It runs on Tauri and maps `devflow-protocol` runtime events into avatar state, motions, expressions, and speech bubbles.
 
 ## Features
 
@@ -48,7 +48,7 @@ npm run dist:mac
 
 - `npm run doctor` checks the Live2D manifest, adapter, default model JSON, and official runtime resources.
 - `npm test` checks the main JavaScript files for syntax errors and runs the Bun tests.
-- `npm run dist:mac` prepares bundled protocol resources and then uses `electron-builder` to output macOS `dmg` and `zip` artifacts.
+- `npm run dist:mac` prepares bundled protocol resources and then uses Tauri to output macOS app artifacts.
 
 ## Local Protocol Service
 
@@ -66,7 +66,7 @@ Override it with an environment variable:
 DEVFLOW_PROTOCOL_URL=http://127.0.0.1:4317 npm run dev
 ```
 
-The packaged app starts the bundled `devflow-protocol-go` from app resources. The tray menu can start or stop the Codex bridge. The bridge starts with `--backfill-recent-minutes 20`, so recent Codex activity is replayed into the avatar shortly after startup.
+The packaged app starts the bundled `devflow-protocol-go` from app resources. The tray menu can start or stop the Codex bridge. The bridge tails new Codex rollout activity from the saved read offsets and does not replay recent history on startup.
 
 ## Packaging
 
@@ -153,8 +153,7 @@ npm test
 
 ```text
 .
-  main.js                         Electron main process, tray menu, and service orchestration
-  preload.js                      Safe bridge for the renderer
+  src-tauri/                      Tauri shell, tray menu, app state, and service orchestration
   ui/                             Desktop overlay page
   src/app/                        App state and local service runtime
   src/dialogue/                   Avatar bubbles and AI persona dialogue logic
