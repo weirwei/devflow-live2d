@@ -968,8 +968,6 @@ fn spawn_codex_bridge_child(app: &AppHandle) -> Result<ManagedChild, String> {
         .arg(DEFAULT_PROTOCOL_BASE_URL)
         .arg("--state-file")
         .arg(runtime_data_root(app).join("codex-bridge-state.json"))
-        .arg("--backfill-recent-minutes")
-        .arg("20")
         .env("PYTHONUNBUFFERED", "1")
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))

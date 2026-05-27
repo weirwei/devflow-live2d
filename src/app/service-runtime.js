@@ -351,8 +351,6 @@ export class DesktopServiceRuntime {
           this.protocolBaseUrl,
           "--state-file",
           this.getCodexBridgeStatePath(),
-          "--backfill-recent-minutes",
-          "20",
         ],
         cwd: this.getProtocolSourceRoot(),
         env: {

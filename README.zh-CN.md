@@ -66,7 +66,7 @@ http://127.0.0.1:4317
 DEVFLOW_PROTOCOL_URL=http://127.0.0.1:4317 npm run dev
 ```
 
-打包后的应用会从应用资源中启动内置的 `devflow-protocol-go`。托盘菜单可以启动或停止 Codex bridge。bridge 启动时会带上 `--backfill-recent-minutes 20`，因此最近的 Codex 活动会在启动后立即回填到桌宠。
+打包后的应用会从应用资源中启动内置的 `devflow-protocol-go`。托盘菜单可以启动或停止 Codex bridge。bridge 会从已保存的读取位置继续监听新的 Codex rollout 活动，启动时不会回放最近历史。
 
 ## 打包
 

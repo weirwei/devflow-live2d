@@ -66,7 +66,7 @@ Override it with an environment variable:
 DEVFLOW_PROTOCOL_URL=http://127.0.0.1:4317 npm run dev
 ```
 
-The packaged app starts the bundled `devflow-protocol-go` from app resources. The tray menu can start or stop the Codex bridge. The bridge starts with `--backfill-recent-minutes 20`, so recent Codex activity is replayed into the avatar shortly after startup.
+The packaged app starts the bundled `devflow-protocol-go` from app resources. The tray menu can start or stop the Codex bridge. The bridge tails new Codex rollout activity from the saved read offsets and does not replay recent history on startup.
 
 ## Packaging
 
