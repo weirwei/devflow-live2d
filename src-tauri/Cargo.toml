@@ -1,6 +1,6 @@
 [package]
 name = "dpartner"
-version = "0.2.0"
+version = "0.3.0"
 description = "macOS Live2D desktop overlay for devflow"
 authors = ["weirwei"]
 edition = "2021"

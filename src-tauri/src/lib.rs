@@ -669,7 +669,15 @@ fn apply_window_state(app: &AppHandle, state: &Value) {
             .and_then(Value::as_bool)
             .unwrap_or(true),
     );
-    apply_macos_overlay_window_level(&window);
+    let always_on_top = state
+        .get("alwaysOnTop")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let all_workspaces = state
+        .get("allWorkspaces")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    apply_macos_overlay_window_level(&window, always_on_top, all_workspaces);
     let _ = window.set_skip_taskbar(true);
     let _ = window.set_ignore_cursor_events(
         state
@@ -689,15 +697,23 @@ fn tray_template_icon(app: &AppHandle) -> Image<'static> {
 }
 
 #[cfg(target_os = "macos")]
-fn apply_macos_overlay_window_level(window: &WebviewWindow) {
+fn apply_macos_overlay_window_level(
+    window: &WebviewWindow,
+    always_on_top: bool,
+    all_workspaces: bool,
+) {
     apply_macos_overlay_app_policy();
-    apply_macos_overlay_window_level_inner(window, false);
+    apply_macos_overlay_window_level_inner(window, always_on_top, all_workspaces, false);
 }
 
 #[cfg(target_os = "macos")]
-fn reinforce_macos_overlay_window_level(window: &WebviewWindow) {
+fn reinforce_macos_overlay_window_level(
+    window: &WebviewWindow,
+    always_on_top: bool,
+    all_workspaces: bool,
+) {
     apply_macos_overlay_app_policy();
-    apply_macos_overlay_window_level_inner(window, true);
+    apply_macos_overlay_window_level_inner(window, always_on_top, all_workspaces, true);
 }
 
 #[cfg(target_os = "macos")]
@@ -710,7 +726,12 @@ fn apply_macos_overlay_app_policy() {
 }
 
 #[cfg(target_os = "macos")]
-fn apply_macos_overlay_window_level_inner(window: &WebviewWindow, order_front: bool) {
+fn apply_macos_overlay_window_level_inner(
+    window: &WebviewWindow,
+    always_on_top: bool,
+    all_workspaces: bool,
+    order_front: bool,
+) {
     let Ok(ns_window_ptr) = window.ns_window() else {
         return;
     };
@@ -719,13 +740,18 @@ fn apply_macos_overlay_window_level_inner(window: &WebviewWindow, order_front: b
     }
     let ns_window = unsafe { &*(ns_window_ptr.cast::<NSWindow>()) };
     install_unconstrained_window_constraint(ns_window);
-    ns_window.setLevel(NSScreenSaverWindowLevel);
-    let behavior = NSWindowCollectionBehavior::CanJoinAllApplications
-        | NSWindowCollectionBehavior::CanJoinAllSpaces
-        | NSWindowCollectionBehavior::FullScreenAuxiliary
+    if always_on_top {
+        ns_window.setLevel(NSScreenSaverWindowLevel);
+    }
+    let mut behavior = NSWindowCollectionBehavior::CanJoinAllApplications
         | NSWindowCollectionBehavior::Transient
         | NSWindowCollectionBehavior::IgnoresCycle
         | NSWindowCollectionBehavior::FullScreenDisallowsTiling;
+    if all_workspaces {
+        behavior = behavior
+            | NSWindowCollectionBehavior::CanJoinAllSpaces
+            | NSWindowCollectionBehavior::FullScreenAuxiliary;
+    }
     ns_window.setCollectionBehavior(behavior);
     ns_window.setCanHide(false);
     ns_window.setHidesOnDeactivate(false);
@@ -772,10 +798,20 @@ fn install_unconstrained_window_constraint(ns_window: &NSWindow) {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn apply_macos_overlay_window_level(_window: &WebviewWindow) {}
+fn apply_macos_overlay_window_level(
+    _window: &WebviewWindow,
+    _always_on_top: bool,
+    _all_workspaces: bool,
+) {
+}
 
 #[cfg(not(target_os = "macos"))]
-fn reinforce_macos_overlay_window_level(_window: &WebviewWindow) {}
+fn reinforce_macos_overlay_window_level(
+    _window: &WebviewWindow,
+    _always_on_top: bool,
+    _all_workspaces: bool,
+) {
+}
 
 fn persist_state(app: &AppHandle, backend: &AppBackend) -> Result<(), String> {
     write_json(&settings_path(app)?, &backend.state)?;
@@ -2151,7 +2187,17 @@ pub fn run() {
             app.manage(Mutex::new(backend));
 
             let window = create_window(&handle, &initial_window_state)?;
-            apply_macos_overlay_window_level(&window);
+            apply_macos_overlay_window_level(
+                &window,
+                initial_window_state
+                    .get("alwaysOnTop")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+                initial_window_state
+                    .get("allWorkspaces")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+            );
             {
                 let state = app.state::<BackendState>();
                 if let Ok(backend) = state.lock() {
@@ -2247,27 +2293,37 @@ pub fn run() {
                     tokio_sleep(MACOS_OVERLAY_REINFORCE_INTERVAL).await;
                     let app_for_main_thread = app_for_overlay_reinforce.clone();
                     let _ = app_for_overlay_reinforce.run_on_main_thread(move || {
-                        let should_reinforce = app_for_main_thread
+                        let overlay_state = app_for_main_thread
                             .try_state::<BackendState>()
                             .and_then(|state| {
                                 state.lock().ok().map(|backend| {
-                                    !backend
+                                    let visible = !backend
                                         .state
                                         .get("hidden")
                                         .and_then(Value::as_bool)
-                                        .unwrap_or(false)
-                                        && backend
-                                            .state
-                                            .get("alwaysOnTop")
-                                            .and_then(Value::as_bool)
-                                            .unwrap_or(true)
+                                        .unwrap_or(false);
+                                    let always_on_top = backend
+                                        .state
+                                        .get("alwaysOnTop")
+                                        .and_then(Value::as_bool)
+                                        .unwrap_or(true);
+                                    let all_workspaces = backend
+                                        .state
+                                        .get("allWorkspaces")
+                                        .and_then(Value::as_bool)
+                                        .unwrap_or(true);
+                                    (visible, always_on_top, all_workspaces)
                                 })
                             })
-                            .unwrap_or(false);
-                        if should_reinforce {
+                            .unwrap_or((false, false, false));
+                        if overlay_state.0 && overlay_state.1 {
                             if let Some(window) = app_for_main_thread.get_webview_window(WINDOW_LABEL)
                             {
-                                reinforce_macos_overlay_window_level(&window);
+                                reinforce_macos_overlay_window_level(
+                                    &window,
+                                    overlay_state.1,
+                                    overlay_state.2,
+                                );
                             }
                         }
                     });
